@@ -21,6 +21,7 @@ import {
   ContextConsumer,
   Mode,
   SuspenseComponent,
+  DehydratedSuspenseComponent,
 } from 'shared/ReactWorkTags';
 
 type MeasurementPhase =
@@ -247,16 +248,15 @@ export function startRequestCallbackTimer(): void {
   }
 }
 
-export function stopRequestCallbackTimer(
-  didExpire: boolean,
-  expirationTime: number,
-): void {
+export function stopRequestCallbackTimer(didExpire: boolean): void {
   if (enableUserTimingAPI) {
     if (supportsUserTiming) {
       isWaitingForCallback = false;
-      const warning = didExpire ? 'React was blocked by main thread' : null;
+      const warning = didExpire
+        ? 'Update expired; will flush synchronously'
+        : null;
       endMark(
-        `(Waiting for async callback... will force flush in ${expirationTime} ms)`,
+        '(Waiting for async callback...)',
         '(Waiting for async callback...)',
         warning,
       );
@@ -317,7 +317,8 @@ export function stopFailedWorkTimer(fiber: Fiber): void {
     }
     fiber._debugIsCurrentlyTiming = false;
     const warning =
-      fiber.tag === SuspenseComponent
+      fiber.tag === SuspenseComponent ||
+      fiber.tag === DehydratedSuspenseComponent
         ? 'Rendering was suspended'
         : 'An error was thrown inside this error boundary';
     endFiberMark(fiber, null, warning);

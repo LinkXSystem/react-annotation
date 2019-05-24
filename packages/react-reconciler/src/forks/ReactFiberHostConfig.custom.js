@@ -29,6 +29,7 @@ export opaque type Props = mixed; // eslint-disable-line no-undef
 export opaque type Container = mixed; // eslint-disable-line no-undef
 export opaque type Instance = mixed; // eslint-disable-line no-undef
 export opaque type TextInstance = mixed; // eslint-disable-line no-undef
+export opaque type SuspenseInstance = mixed; // eslint-disable-line no-undef
 export opaque type HydratableInstance = mixed; // eslint-disable-line no-undef
 export opaque type PublicInstance = mixed; // eslint-disable-line no-undef
 export opaque type HostContext = mixed; // eslint-disable-line no-undef
@@ -40,6 +41,10 @@ export opaque type NoTimeout = mixed; // eslint-disable-line no-undef
 export const getPublicInstance = $$$hostConfig.getPublicInstance;
 export const getRootHostContext = $$$hostConfig.getRootHostContext;
 export const getChildHostContext = $$$hostConfig.getChildHostContext;
+export const getChildHostContextForEventComponent =
+  $$$hostConfig.getChildHostContextForEventComponent;
+export const getChildHostContextForEventTarget =
+  $$$hostConfig.getChildHostContextForEventTarget;
 export const prepareForCommit = $$$hostConfig.prepareForCommit;
 export const resetAfterCommit = $$$hostConfig.resetAfterCommit;
 export const createInstance = $$$hostConfig.createInstance;
@@ -50,19 +55,19 @@ export const shouldSetTextContent = $$$hostConfig.shouldSetTextContent;
 export const shouldDeprioritizeSubtree =
   $$$hostConfig.shouldDeprioritizeSubtree;
 export const createTextInstance = $$$hostConfig.createTextInstance;
-export const scheduleDeferredCallback = $$$hostConfig.scheduleDeferredCallback;
-export const cancelDeferredCallback = $$$hostConfig.cancelDeferredCallback;
-export const shouldYield = $$$hostConfig.shouldYield;
 export const scheduleTimeout = $$$hostConfig.setTimeout;
 export const cancelTimeout = $$$hostConfig.clearTimeout;
 export const noTimeout = $$$hostConfig.noTimeout;
-export const schedulePassiveEffects = $$$hostConfig.schedulePassiveEffects;
-export const cancelPassiveEffects = $$$hostConfig.cancelPassiveEffects;
 export const now = $$$hostConfig.now;
 export const isPrimaryRenderer = $$$hostConfig.isPrimaryRenderer;
 export const supportsMutation = $$$hostConfig.supportsMutation;
 export const supportsPersistence = $$$hostConfig.supportsPersistence;
 export const supportsHydration = $$$hostConfig.supportsHydration;
+export const mountEventComponent = $$$hostConfig.mountEventComponent;
+export const updateEventComponent = $$$hostConfig.updateEventComponent;
+export const handleEventTarget = $$$hostConfig.handleEventTarget;
+export const getEventTargetChildElement =
+  $$$hostConfig.getEventTargetChildElement;
 
 // -------------------
 //      Mutation
@@ -82,6 +87,10 @@ export const hideInstance = $$$hostConfig.hideInstance;
 export const hideTextInstance = $$$hostConfig.hideTextInstance;
 export const unhideInstance = $$$hostConfig.unhideInstance;
 export const unhideTextInstance = $$$hostConfig.unhideTextInstance;
+export const unmountEventComponent = $$$hostConfig.unmountEventComponent;
+export const commitTouchHitTargetUpdate =
+  $$$hostConfig.commitTouchHitTargetUpdate;
+export const commitEventTarget = $$$hostConfig.commitEventTarget;
 
 // -------------------
 //     Persistence
@@ -95,8 +104,7 @@ export const finalizeContainerChildren =
   $$$hostConfig.finalizeContainerChildren;
 export const replaceContainerChildren = $$$hostConfig.replaceContainerChildren;
 export const cloneHiddenInstance = $$$hostConfig.cloneHiddenInstance;
-export const cloneUnhiddenInstance = $$$hostConfig.cloneUnhiddenInstance;
-export const createHiddenTextInstance = $$$hostConfig.createHiddenTextInstance;
+export const cloneHiddenTextInstance = $$$hostConfig.cloneHiddenTextInstance;
 
 // -------------------
 //     Hydration
@@ -104,10 +112,23 @@ export const createHiddenTextInstance = $$$hostConfig.createHiddenTextInstance;
 // -------------------
 export const canHydrateInstance = $$$hostConfig.canHydrateInstance;
 export const canHydrateTextInstance = $$$hostConfig.canHydrateTextInstance;
+export const canHydrateSuspenseInstance =
+  $$$hostConfig.canHydrateSuspenseInstance;
+export const isSuspenseInstancePending =
+  $$$hostConfig.isSuspenseInstancePending;
+export const isSuspenseInstanceFallback =
+  $$$hostConfig.isSuspenseInstanceFallback;
+export const registerSuspenseInstanceRetry =
+  $$$hostConfig.registerSuspenseInstanceRetry;
 export const getNextHydratableSibling = $$$hostConfig.getNextHydratableSibling;
 export const getFirstHydratableChild = $$$hostConfig.getFirstHydratableChild;
 export const hydrateInstance = $$$hostConfig.hydrateInstance;
 export const hydrateTextInstance = $$$hostConfig.hydrateTextInstance;
+export const getNextHydratableInstanceAfterSuspenseInstance =
+  $$$hostConfig.getNextHydratableInstanceAfterSuspenseInstance;
+export const clearSuspenseBoundary = $$$hostConfig.clearSuspenseBoundary;
+export const clearSuspenseBoundaryFromContainer =
+  $$$hostConfig.clearSuspenseBoundaryFromContainer;
 export const didNotMatchHydratedContainerTextInstance =
   $$$hostConfig.didNotMatchHydratedContainerTextInstance;
 export const didNotMatchHydratedTextInstance =
@@ -119,7 +140,11 @@ export const didNotFindHydratableContainerInstance =
   $$$hostConfig.didNotFindHydratableContainerInstance;
 export const didNotFindHydratableContainerTextInstance =
   $$$hostConfig.didNotFindHydratableContainerTextInstance;
+export const didNotFindHydratableContainerSuspenseInstance =
+  $$$hostConfig.didNotFindHydratableContainerSuspenseInstance;
 export const didNotFindHydratableInstance =
   $$$hostConfig.didNotFindHydratableInstance;
 export const didNotFindHydratableTextInstance =
   $$$hostConfig.didNotFindHydratableTextInstance;
+export const didNotFindHydratableSuspenseInstance =
+  $$$hostConfig.didNotFindHydratableSuspenseInstance;

@@ -1,6 +1,6 @@
 'use strict';
 
-const {rollup} = require('rollup');
+const rollup = require('rollup');
 const babel = require('rollup-plugin-babel');
 const closure = require('./plugins/closure-plugin');
 const commonjs = require('rollup-plugin-commonjs');
@@ -78,6 +78,7 @@ const requestedBundleTypes = argv.type
   : [];
 const requestedBundleNames = parseRequestedNames(argv._, 'lowercase');
 const forcePrettyOutput = argv.pretty;
+const isWatchMode = argv.watch;
 const syncFBSourcePath = argv['sync-fbsource'];
 const syncWWWPath = argv['sync-www'];
 const shouldExtractErrors = argv['extract-errors'];
@@ -113,7 +114,7 @@ function getBabelConfig(updateBabelOptions, bundleType, filename) {
       return Object.assign({}, options, {
         plugins: options.plugins.concat([
           // Minify invariant messages
-          require('../error-codes/replace-invariant-error-codes'),
+          require('../error-codes/transform-error-messages'),
           // Wrap warning() calls in a __DEV__ check so they are stripped from production.
           require('../babel/wrap-warning-with-env-check'),
         ]),
@@ -126,6 +127,11 @@ function getBabelConfig(updateBabelOptions, bundleType, filename) {
     case RN_FB_PROFILING:
       return Object.assign({}, options, {
         plugins: options.plugins.concat([
+          [
+            require('../error-codes/transform-error-messages'),
+            // Preserve full error messages in React Native build
+            {noMinify: true},
+          ],
           // Wrap warning() calls in a __DEV__ check so they are stripped from production.
           require('../babel/wrap-warning-with-env-check'),
         ]),
@@ -141,7 +147,7 @@ function getBabelConfig(updateBabelOptions, bundleType, filename) {
           // Use object-assign polyfill in open source
           path.resolve('./scripts/babel/transform-object-assign-require'),
           // Minify invariant messages
-          require('../error-codes/replace-invariant-error-codes'),
+          require('../error-codes/transform-error-messages'),
           // Wrap warning() calls in a __DEV__ check so they are stripped from production.
           require('../babel/wrap-warning-with-env-check'),
         ]),
@@ -521,19 +527,42 @@ async function createBundle(bundle, bundleType) {
     bundleType
   );
 
-  console.log(`${chalk.bgYellow.black(' BUILDING ')} ${logKey}`);
-  try {
-    const result = await rollup(rollupConfig);
-    await result.write(rollupOutputOptions);
-  } catch (error) {
-    console.log(`${chalk.bgRed.black(' OH NOES! ')} ${logKey}\n`);
-    handleRollupError(error);
-    throw error;
+  if (isWatchMode) {
+    rollupConfig.output = [rollupOutputOptions];
+    const watcher = rollup.watch(rollupConfig);
+    watcher.on('event', async event => {
+      switch (event.code) {
+        case 'BUNDLE_START':
+          console.log(`${chalk.bgYellow.black(' BUILDING ')} ${logKey}`);
+          break;
+        case 'BUNDLE_END':
+          for (let i = 0; i < otherOutputPaths.length; i++) {
+            await asyncCopyTo(mainOutputPath, otherOutputPaths[i]);
+          }
+          console.log(`${chalk.bgGreen.black(' COMPLETE ')} ${logKey}\n`);
+          break;
+        case 'ERROR':
+        case 'FATAL':
+          console.log(`${chalk.bgRed.black(' OH NOES! ')} ${logKey}\n`);
+          handleRollupError(event.error);
+          break;
+      }
+    });
+  } else {
+    console.log(`${chalk.bgYellow.black(' BUILDING ')} ${logKey}`);
+    try {
+      const result = await rollup.rollup(rollupConfig);
+      await result.write(rollupOutputOptions);
+    } catch (error) {
+      console.log(`${chalk.bgRed.black(' OH NOES! ')} ${logKey}\n`);
+      handleRollupError(error);
+      throw error;
+    }
+    for (let i = 0; i < otherOutputPaths.length; i++) {
+      await asyncCopyTo(mainOutputPath, otherOutputPaths[i]);
+    }
+    console.log(`${chalk.bgGreen.black(' COMPLETE ')} ${logKey}\n`);
   }
-  for (let i = 0; i < otherOutputPaths.length; i++) {
-    await asyncCopyTo(mainOutputPath, otherOutputPaths[i]);
-  }
-  console.log(`${chalk.bgGreen.black(' COMPLETE ')} ${logKey}\n`);
 }
 
 function handleRollupWarning(warning) {

@@ -13,6 +13,12 @@ import {registrationNameModules} from 'events/EventPluginRegistry';
 import warning from 'shared/warning';
 import {canUseDOM} from 'shared/ExecutionEnvironment';
 import warningWithoutStack from 'shared/warningWithoutStack';
+import type {ReactEventResponderEventType} from 'shared/ReactTypes';
+import type {DOMTopLevelEventType} from 'events/TopLevelEventTypes';
+import {
+  setListenToResponderEventTypes,
+  generateListeningKey,
+} from '../events/DOMEventResponderSystem';
 
 import {
   getValueForAttribute,
@@ -57,7 +63,12 @@ import {
   TOP_SUBMIT,
   TOP_TOGGLE,
 } from '../events/DOMTopLevelEventTypes';
-import {listenTo, trapBubbledEvent} from '../events/ReactBrowserEventEmitter';
+import {
+  listenTo,
+  trapBubbledEvent,
+  getListeningSetForElement,
+} from '../events/ReactBrowserEventEmitter';
+import {trapEventForResponderEventSystem} from '../events/ReactDOMEventListener.js';
 import {mediaEventTypes} from '../events/DOMTopLevelEventTypes';
 import {
   createDangerousStringForStyles,
@@ -78,12 +89,15 @@ import {validateProperties as validateARIAProperties} from '../shared/ReactDOMIn
 import {validateProperties as validateInputProperties} from '../shared/ReactDOMNullInputValuePropHook';
 import {validateProperties as validateUnknownProperties} from '../shared/ReactDOMUnknownPropertyHook';
 
+import {enableEventAPI} from 'shared/ReactFeatureFlags';
+
 let didWarnInvalidHydration = false;
 let didWarnShadyDOM = false;
 
 const DANGEROUSLY_SET_INNER_HTML = 'dangerouslySetInnerHTML';
 const SUPPRESS_CONTENT_EDITABLE_WARNING = 'suppressContentEditableWarning';
 const SUPPRESS_HYDRATION_WARNING = 'suppressHydrationWarning';
+const HYDRATE_TOUCH_HIT_TARGET = 'hydrateTouchHitTarget';
 const AUTOFOCUS = 'autoFocus';
 const CHILDREN = 'children';
 const STYLE = 'style';
@@ -253,7 +267,10 @@ if (__DEV__) {
   };
 }
 
-function ensureListeningTo(rootContainerElement, registrationName) {
+function ensureListeningTo(
+  rootContainerElement: Element | Node,
+  registrationName: string,
+): void {
   const isDocumentOrFragment =
     rootContainerElement.nodeType === DOCUMENT_NODE ||
     rootContainerElement.nodeType === DOCUMENT_FRAGMENT_NODE;
@@ -419,14 +436,25 @@ export function createElement(
       // See discussion in https://github.com/facebook/react/pull/6896
       // and discussion in https://bugzilla.mozilla.org/show_bug.cgi?id=1276240
       domElement = ownerDocument.createElement(type);
-      // Normally attributes are assigned in `setInitialDOMProperties`, however the `multiple`
-      // attribute on `select`s needs to be added before `option`s are inserted. This prevents
-      // a bug where the `select` does not scroll to the correct option because singular
-      // `select` elements automatically pick the first item.
+      // Normally attributes are assigned in `setInitialDOMProperties`, however the `multiple` and `size`
+      // attributes on `select`s needs to be added before `option`s are inserted.
+      // This prevents:
+      // - a bug where the `select` does not scroll to the correct option because singular
+      //  `select` elements automatically pick the first item #13222
+      // - a bug where the `select` set the first item as selected despite the `size` attribute #14239
       // See https://github.com/facebook/react/issues/13222
-      if (type === 'select' && props.multiple) {
+      // and https://github.com/facebook/react/issues/14239
+      if (type === 'select') {
         const node = ((domElement: any): HTMLSelectElement);
-        node.multiple = true;
+        if (props.multiple) {
+          node.multiple = true;
+        } else if (props.size) {
+          // Setting a size greater than 1 causes a select to behave like `multiple=true`, where
+          // it is possible that no option is selected.
+          //
+          // This is only necessary when a select in "single selection mode".
+          node.size = props.size;
+        }
       }
     }
   } else {
@@ -494,6 +522,7 @@ export function setInitialProperties(
   switch (tag) {
     case 'iframe':
     case 'object':
+    case 'embed':
       trapBubbledEvent(TOP_LOAD, domElement);
       props = rawProps;
       break;
@@ -888,6 +917,7 @@ export function diffHydratedProperties(
   switch (tag) {
     case 'iframe':
     case 'object':
+    case 'embed':
       trapBubbledEvent(TOP_LOAD, domElement);
       break;
     case 'video':
@@ -1004,6 +1034,8 @@ export function diffHydratedProperties(
         }
         ensureListeningTo(rootContainerElement, propKey);
       }
+    } else if (enableEventAPI && propKey === HYDRATE_TOUCH_HIT_TARGET) {
+      updatePayload = [STYLE, rawProps.style];
     } else if (
       __DEV__ &&
       // Convince Flow we've calculated it (it's DEV-only in this method.)
@@ -1252,4 +1284,59 @@ export function restoreControlledState(
       ReactDOMSelectRestoreControlledState(domElement, props);
       return;
   }
+}
+
+export function listenToEventResponderEventTypes(
+  eventTypes: Array<ReactEventResponderEventType>,
+  element: Element | Document,
+): void {
+  if (enableEventAPI) {
+    // Get the listening Set for this element. We use this to track
+    // what events we're listening to.
+    const listeningSet = getListeningSetForElement(element);
+
+    // Go through each target event type of the event responder
+    for (let i = 0, length = eventTypes.length; i < length; ++i) {
+      const targetEventType = eventTypes[i];
+      let topLevelType;
+      let passive = true;
+
+      // If no event config object is provided (i.e. - only a string),
+      // we default to enabling passive and not capture.
+      if (typeof targetEventType === 'string') {
+        topLevelType = targetEventType;
+      } else {
+        if (__DEV__) {
+          warning(
+            typeof targetEventType === 'object' && targetEventType !== null,
+            'Event Responder: invalid entry in event types array. ' +
+              'Entry must be string or an object. Instead, got %s.',
+            targetEventType,
+          );
+        }
+        const targetEventConfigObject = ((targetEventType: any): {
+          name: string,
+          passive?: boolean,
+        });
+        topLevelType = targetEventConfigObject.name;
+        if (targetEventConfigObject.passive !== undefined) {
+          passive = targetEventConfigObject.passive;
+        }
+      }
+      const listeningName = generateListeningKey(topLevelType, passive);
+      if (!listeningSet.has(listeningName)) {
+        trapEventForResponderEventSystem(
+          element,
+          ((topLevelType: any): DOMTopLevelEventType),
+          passive,
+        );
+        listeningSet.add(listeningName);
+      }
+    }
+  }
+}
+
+// We can remove this once the event API is stable and out of a flag
+if (enableEventAPI) {
+  setListenToResponderEventTypes(listenToEventResponderEventTypes);
 }

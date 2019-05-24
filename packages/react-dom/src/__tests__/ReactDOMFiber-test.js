@@ -461,6 +461,40 @@ describe('ReactDOMFiber', () => {
     expect(container.innerHTML).toBe('<div></div>');
   });
 
+  it('should unmount empty portal component wherever it appears', () => {
+    const portalContainer = document.createElement('div');
+
+    class Wrapper extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = {
+          show: true,
+        };
+      }
+      render() {
+        return (
+          <div>
+            {this.state.show && (
+              <React.Fragment>
+                {ReactDOM.createPortal(null, portalContainer)}
+                <div>child</div>
+              </React.Fragment>
+            )}
+            <div>parent</div>
+          </div>
+        );
+      }
+    }
+
+    const instance = ReactDOM.render(<Wrapper />, container);
+    expect(container.innerHTML).toBe(
+      '<div><div>child</div><div>parent</div></div>',
+    );
+    instance.setState({show: false});
+    expect(instance.state.show).toBe(false);
+    expect(container.innerHTML).toBe('<div><div>parent</div></div>');
+  });
+
   it('should keep track of namespace across portals (simple)', () => {
     assertNamespacesMatch(
       <svg {...expectSVG}>
@@ -1012,7 +1046,11 @@ describe('ReactDOMFiber', () => {
     class Click extends React.Component {
       constructor() {
         super();
-        node.click();
+        expect(() => {
+          node.click();
+        }).toWarnDev(
+          'Warning: unstable_flushDiscreteUpdates: Cannot flush updates when React is already rendering.',
+        );
       }
       render() {
         return null;

@@ -24,7 +24,7 @@ import shallowEqual from 'shared/shallowEqual';
 import getComponentName from 'shared/getComponentName';
 import invariant from 'shared/invariant';
 import warningWithoutStack from 'shared/warningWithoutStack';
-import {REACT_CONTEXT_TYPE} from 'shared/ReactSymbols';
+import {REACT_CONTEXT_TYPE, REACT_PROVIDER_TYPE} from 'shared/ReactSymbols';
 
 import {startPhaseTimer, stopPhaseTimer} from './ReactDebugFiberPerf';
 import {resolveDefaultProps} from './ReactFiberLazyComponent';
@@ -53,7 +53,9 @@ import {
   computeExpirationForFiber,
   scheduleWork,
   flushPassiveEffects,
-} from './ReactFiberScheduler';
+} from './ReactFiberWorkLoop';
+import {revertPassiveEffectsChange} from 'shared/ReactFeatureFlags';
+import {requestCurrentSuspenseConfig} from './ReactFiberSuspenseConfig';
 
 const fakeInternalInstance = {};
 const isArray = Array.isArray;
@@ -183,9 +185,14 @@ const classComponentUpdater = {
   enqueueSetState(inst, payload, callback) {
     const fiber = getInstance(inst);
     const currentTime = requestCurrentTime();
-    const expirationTime = computeExpirationForFiber(currentTime, fiber);
+    const suspenseConfig = requestCurrentSuspenseConfig();
+    const expirationTime = computeExpirationForFiber(
+      currentTime,
+      fiber,
+      suspenseConfig,
+    );
 
-    const update = createUpdate(expirationTime);
+    const update = createUpdate(expirationTime, suspenseConfig);
     update.payload = payload;
     if (callback !== undefined && callback !== null) {
       if (__DEV__) {
@@ -194,16 +201,23 @@ const classComponentUpdater = {
       update.callback = callback;
     }
 
-    flushPassiveEffects();
+    if (revertPassiveEffectsChange) {
+      flushPassiveEffects();
+    }
     enqueueUpdate(fiber, update);
     scheduleWork(fiber, expirationTime);
   },
   enqueueReplaceState(inst, payload, callback) {
     const fiber = getInstance(inst);
     const currentTime = requestCurrentTime();
-    const expirationTime = computeExpirationForFiber(currentTime, fiber);
+    const suspenseConfig = requestCurrentSuspenseConfig();
+    const expirationTime = computeExpirationForFiber(
+      currentTime,
+      fiber,
+      suspenseConfig,
+    );
 
-    const update = createUpdate(expirationTime);
+    const update = createUpdate(expirationTime, suspenseConfig);
     update.tag = ReplaceState;
     update.payload = payload;
 
@@ -214,16 +228,23 @@ const classComponentUpdater = {
       update.callback = callback;
     }
 
-    flushPassiveEffects();
+    if (revertPassiveEffectsChange) {
+      flushPassiveEffects();
+    }
     enqueueUpdate(fiber, update);
     scheduleWork(fiber, expirationTime);
   },
   enqueueForceUpdate(inst, callback) {
     const fiber = getInstance(inst);
     const currentTime = requestCurrentTime();
-    const expirationTime = computeExpirationForFiber(currentTime, fiber);
+    const suspenseConfig = requestCurrentSuspenseConfig();
+    const expirationTime = computeExpirationForFiber(
+      currentTime,
+      fiber,
+      suspenseConfig,
+    );
 
-    const update = createUpdate(expirationTime);
+    const update = createUpdate(expirationTime, suspenseConfig);
     update.tag = ForceUpdate;
 
     if (callback !== undefined && callback !== null) {
@@ -233,7 +254,9 @@ const classComponentUpdater = {
       update.callback = callback;
     }
 
-    flushPassiveEffects();
+    if (revertPassiveEffectsChange) {
+      flushPassiveEffects();
+    }
     enqueueUpdate(fiber, update);
     scheduleWork(fiber, expirationTime);
   },
@@ -513,23 +536,51 @@ function constructClassInstance(
   let unmaskedContext = emptyContextObject;
   let context = null;
   const contextType = ctor.contextType;
-  if (typeof contextType === 'object' && contextType !== null) {
-    if (__DEV__) {
-      if (
-        contextType.$$typeof !== REACT_CONTEXT_TYPE &&
-        !didWarnAboutInvalidateContextType.has(ctor)
-      ) {
+
+  if (__DEV__) {
+    if ('contextType' in ctor) {
+      let isValid =
+        // Allow null for conditional declaration
+        contextType === null ||
+        (contextType !== undefined &&
+          contextType.$$typeof === REACT_CONTEXT_TYPE &&
+          contextType._context === undefined); // Not a <Context.Consumer>
+
+      if (!isValid && !didWarnAboutInvalidateContextType.has(ctor)) {
         didWarnAboutInvalidateContextType.add(ctor);
+
+        let addendum = '';
+        if (contextType === undefined) {
+          addendum =
+            ' However, it is set to undefined. ' +
+            'This can be caused by a typo or by mixing up named and default imports. ' +
+            'This can also happen due to a circular dependency, so ' +
+            'try moving the createContext() call to a separate file.';
+        } else if (typeof contextType !== 'object') {
+          addendum = ' However, it is set to a ' + typeof contextType + '.';
+        } else if (contextType.$$typeof === REACT_PROVIDER_TYPE) {
+          addendum = ' Did you accidentally pass the Context.Provider instead?';
+        } else if (contextType._context !== undefined) {
+          // <Context.Consumer>
+          addendum = ' Did you accidentally pass the Context.Consumer instead?';
+        } else {
+          addendum =
+            ' However, it is set to an object with keys {' +
+            Object.keys(contextType).join(', ') +
+            '}.';
+        }
         warningWithoutStack(
           false,
           '%s defines an invalid contextType. ' +
-            'contextType should point to the Context object returned by React.createContext(). ' +
-            'Did you accidentally pass the Context.Provider instead?',
+            'contextType should point to the Context object returned by React.createContext().%s',
           getComponentName(ctor) || 'Component',
+          addendum,
         );
       }
     }
+  }
 
+  if (typeof contextType === 'object' && contextType !== null) {
     context = readContext((contextType: any));
   } else {
     unmaskedContext = getUnmaskedContext(workInProgress, ctor, true);

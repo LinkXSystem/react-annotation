@@ -8,14 +8,17 @@
  */
 
 import type {ReactNativeBaseComponentViewConfig} from './ReactNativeTypes';
+import type {ReactEventComponentInstance} from 'shared/ReactTypes';
 
 import invariant from 'shared/invariant';
 
 // Modules provided by RN:
-import UIManager from 'UIManager';
-import deepFreezeAndThrowOnMutationInDev from 'deepFreezeAndThrowOnMutationInDev';
+import {
+  ReactNativeViewConfigRegistry,
+  UIManager,
+  deepFreezeAndThrowOnMutationInDev,
+} from 'react-native/Libraries/ReactPrivate/ReactNativePrivateInterface';
 
-import {get as getViewConfigForType} from 'ReactNativeViewConfigRegistry';
 import {create, diff} from './ReactNativeAttributePayload';
 import {
   precacheFiberNode,
@@ -23,12 +26,8 @@ import {
   updateFiberProps,
 } from './ReactNativeComponentTree';
 import ReactNativeFiberHostComponent from './ReactNativeFiberHostComponent';
-import {
-  now as ReactNativeFrameSchedulingNow,
-  cancelDeferredCallback as ReactNativeFrameSchedulingCancelDeferredCallback,
-  scheduleDeferredCallback as ReactNativeFrameSchedulingScheduleDeferredCallback,
-  shouldYield as ReactNativeFrameSchedulingShouldYield,
-} from './ReactNativeFrameScheduling';
+
+const {get: getViewConfigForType} = ReactNativeViewConfigRegistry;
 
 export type Type = string;
 export type Props = Object;
@@ -106,11 +105,6 @@ export function createInstance(
       }
     }
   }
-
-  invariant(
-    type !== 'RCTView' || !hostContext.isInAParentText,
-    'Nesting of <View> within <Text> is not currently supported.',
-  );
 
   const updatePayload = create(props, viewConfig.validAttributes);
 
@@ -211,6 +205,21 @@ export function getChildHostContext(
   }
 }
 
+export function getChildHostContextForEventComponent(
+  parentHostContext: HostContext,
+) {
+  // TODO: add getChildHostContextForEventComponent implementation
+  return parentHostContext;
+}
+
+export function getChildHostContextForEventTarget(
+  parentHostContext: HostContext,
+  type: Symbol | number,
+) {
+  // TODO: add getChildHostContextForEventTarget implementation
+  return parentHostContext;
+}
+
 export function getPublicInstance(instance: Instance): * {
   return instance;
 }
@@ -234,17 +243,11 @@ export function resetAfterCommit(containerInfo: Container): void {
   // Noop
 }
 
-export const now = ReactNativeFrameSchedulingNow;
 export const isPrimaryRenderer = true;
-export const scheduleDeferredCallback = ReactNativeFrameSchedulingScheduleDeferredCallback;
-export const cancelDeferredCallback = ReactNativeFrameSchedulingCancelDeferredCallback;
-export const shouldYield = ReactNativeFrameSchedulingShouldYield;
 
 export const scheduleTimeout = setTimeout;
 export const cancelTimeout = clearTimeout;
 export const noTimeout = -1;
-export const schedulePassiveEffects = scheduleDeferredCallback;
-export const cancelPassiveEffects = cancelDeferredCallback;
 
 export function shouldDeprioritizeSubtree(type: string, props: Props): boolean {
   return false;
@@ -485,6 +488,49 @@ export function unhideInstance(instance: Instance, props: Props): void {
 export function unhideTextInstance(
   textInstance: TextInstance,
   text: string,
+): void {
+  throw new Error('Not yet implemented.');
+}
+
+export function mountEventComponent(
+  eventComponentInstance: ReactEventComponentInstance,
+) {
+  throw new Error('Not yet implemented.');
+}
+
+export function updateEventComponent(
+  eventComponentInstance: ReactEventComponentInstance,
+) {
+  throw new Error('Not yet implemented.');
+}
+
+export function unmountEventComponent(
+  eventComponentInstance: ReactEventComponentInstance,
+): void {
+  throw new Error('Not yet implemented.');
+}
+
+export function getEventTargetChildElement(
+  type: Symbol | number,
+  props: Props,
+): null {
+  throw new Error('Not yet implemented.');
+}
+
+export function handleEventTarget(
+  type: Symbol | number,
+  props: Props,
+  rootContainerInstance: Container,
+  internalInstanceHandle: Object,
+): boolean {
+  throw new Error('Not yet implemented.');
+}
+
+export function commitEventTarget(
+  type: Symbol | number,
+  props: Props,
+  instance: Instance,
+  parentInstance: Instance,
 ): void {
   throw new Error('Not yet implemented.');
 }
