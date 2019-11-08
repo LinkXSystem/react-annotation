@@ -87,6 +87,7 @@
 import type {Fiber} from './ReactFiber';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
 import type {SuspenseConfig} from './ReactFiberSuspenseConfig';
+import type {ReactPriorityLevel} from './SchedulerWithReactIntegration';
 
 import {NoWork} from './ReactFiberExpirationTime';
 import {
@@ -96,16 +97,17 @@ import {
 import {Callback, ShouldCapture, DidCapture} from 'shared/ReactSideEffectTags';
 import {ClassComponent} from 'shared/ReactWorkTags';
 
-import {
-  debugRenderPhaseSideEffects,
-  debugRenderPhaseSideEffectsForStrictMode,
-} from 'shared/ReactFeatureFlags';
+import {debugRenderPhaseSideEffectsForStrictMode} from 'shared/ReactFeatureFlags';
 
 import {StrictMode} from './ReactTypeOfMode';
-import {markRenderEventTimeAndConfig} from './ReactFiberWorkLoop';
+import {
+  markRenderEventTimeAndConfig,
+  markUnprocessedUpdateTime,
+} from './ReactFiberWorkLoop';
 
 import invariant from 'shared/invariant';
 import warningWithoutStack from 'shared/warningWithoutStack';
+import {getCurrentPriorityLevel} from './SchedulerWithReactIntegration';
 
 export type Update<State> = {
   expirationTime: ExpirationTime,
@@ -117,6 +119,9 @@ export type Update<State> = {
 
   next: Update<State> | null,
   nextEffect: Update<State> | null,
+
+  //DEV only
+  priority?: ReactPriorityLevel,
 };
 
 export type UpdateQueue<State> = {
@@ -197,7 +202,7 @@ export function createUpdate(
   expirationTime: ExpirationTime,
   suspenseConfig: null | SuspenseConfig,
 ): Update<*> {
-  return {
+  let update: Update<*> = {
     expirationTime,
     suspenseConfig,
 
@@ -208,6 +213,10 @@ export function createUpdate(
     next: null,
     nextEffect: null,
   };
+  if (__DEV__) {
+    update.priority = getCurrentPriorityLevel();
+  }
+  return update;
 }
 
 function appendUpdateToQueue<State>(
@@ -361,9 +370,8 @@ function getStateFromUpdate<State>(
         if (__DEV__) {
           enterDisallowedContextReadInDEV();
           if (
-            debugRenderPhaseSideEffects ||
-            (debugRenderPhaseSideEffectsForStrictMode &&
-              workInProgress.mode & StrictMode)
+            debugRenderPhaseSideEffectsForStrictMode &&
+            workInProgress.mode & StrictMode
           ) {
             payload.call(instance, prevState, nextProps);
           }
@@ -390,9 +398,8 @@ function getStateFromUpdate<State>(
         if (__DEV__) {
           enterDisallowedContextReadInDEV();
           if (
-            debugRenderPhaseSideEffects ||
-            (debugRenderPhaseSideEffectsForStrictMode &&
-              workInProgress.mode & StrictMode)
+            debugRenderPhaseSideEffectsForStrictMode &&
+            workInProgress.mode & StrictMode
           ) {
             payload.call(instance, prevState, nextProps);
           }
@@ -571,6 +578,7 @@ export function processUpdateQueue<State>(
   // dealt with the props. Context in components that specify
   // shouldComponentUpdate is tricky; but we'll have to account for
   // that regardless.
+  markUnprocessedUpdateTime(newExpirationTime);
   workInProgress.expirationTime = newExpirationTime;
   workInProgress.memoizedState = resultState;
 

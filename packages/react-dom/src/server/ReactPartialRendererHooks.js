@@ -7,10 +7,16 @@
  * @flow
  */
 
-import type {Dispatcher as DispatcherType} from 'react-reconciler/src/ReactFiberHooks';
+import type {
+  Dispatcher as DispatcherType,
+  TimeoutConfig,
+} from 'react-reconciler/src/ReactFiberHooks';
 import type {ThreadID} from './ReactThreadIDAllocator';
-import type {ReactContext} from 'shared/ReactTypes';
-
+import type {
+  ReactContext,
+  ReactEventResponderListener,
+} from 'shared/ReactTypes';
+import type {SuspenseConfig} from 'react-reconciler/src/ReactFiberSuspenseConfig';
 import {validateContextBounds} from './ReactPartialRendererContext';
 
 import invariant from 'shared/invariant';
@@ -447,6 +453,28 @@ export function useCallback<T>(
   return callback;
 }
 
+function useResponder(responder, props): ReactEventResponderListener<any, any> {
+  return {
+    props,
+    responder,
+  };
+}
+
+function useDeferredValue<T>(value: T, config: TimeoutConfig | null | void): T {
+  resolveCurrentlyRenderingComponent();
+  return value;
+}
+
+function useTransition(
+  config: SuspenseConfig | null | void,
+): [(callback: () => void) => void, boolean] {
+  resolveCurrentlyRenderingComponent();
+  const startTransition = callback => {
+    callback();
+  };
+  return [startTransition, false];
+}
+
 function noop(): void {}
 
 export let currentThreadID: ThreadID = 0;
@@ -470,4 +498,7 @@ export const Dispatcher: DispatcherType = {
   useEffect: noop,
   // Debugging effect
   useDebugValue: noop,
+  useResponder,
+  useDeferredValue,
+  useTransition,
 };

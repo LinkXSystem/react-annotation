@@ -7,10 +7,16 @@
  * @flow
  */
 
-import type {ReactContext, ReactProviderType} from 'shared/ReactTypes';
+import type {
+  ReactContext,
+  ReactProviderType,
+  ReactEventResponder,
+  ReactEventResponderListener,
+} from 'shared/ReactTypes';
 import type {Fiber} from 'react-reconciler/src/ReactFiber';
-import type {Hook} from 'react-reconciler/src/ReactFiberHooks';
+import type {Hook, TimeoutConfig} from 'react-reconciler/src/ReactFiberHooks';
 import type {Dispatcher as DispatcherType} from 'react-reconciler/src/ReactFiberHooks';
+import type {SuspenseConfig} from 'react-reconciler/src/ReactFiberSuspenseConfig';
 
 import ErrorStackParser from 'error-stack-parser';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -215,6 +221,44 @@ function useMemo<T>(
   return value;
 }
 
+function useResponder(
+  responder: ReactEventResponder<any, any>,
+  listenerProps: Object,
+): ReactEventResponderListener<any, any> {
+  // Don't put the actual event responder object in, just its displayName
+  const value = {
+    responder: responder.displayName || 'EventResponder',
+    props: listenerProps,
+  };
+  hookLog.push({primitive: 'Responder', stackError: new Error(), value});
+  return {
+    responder,
+    props: listenerProps,
+  };
+}
+
+function useTransition(
+  config: SuspenseConfig | null | void,
+): [(() => void) => void, boolean] {
+  nextHook();
+  hookLog.push({
+    primitive: 'Transition',
+    stackError: new Error(),
+    value: config,
+  });
+  return [callback => {}, false];
+}
+
+function useDeferredValue<T>(value: T, config: TimeoutConfig | null | void): T {
+  nextHook();
+  hookLog.push({
+    primitive: 'DeferredValue',
+    stackError: new Error(),
+    value,
+  });
+  return value;
+}
+
 const Dispatcher: DispatcherType = {
   readContext,
   useCallback,
@@ -227,18 +271,21 @@ const Dispatcher: DispatcherType = {
   useReducer,
   useRef,
   useState,
+  useResponder,
+  useTransition,
+  useDeferredValue,
 };
 
 // Inspect
 
-type HooksNode = {
+export type HooksNode = {
   id: number | null,
   isStateEditable: boolean,
   name: string,
   value: mixed,
   subHooks: Array<HooksNode>,
 };
-type HooksTree = Array<HooksNode>;
+export type HooksTree = Array<HooksNode>;
 
 // Don't assume
 //

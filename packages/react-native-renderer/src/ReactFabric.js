@@ -7,7 +7,7 @@
  * @flow
  */
 
-import type {ReactFabricType} from './ReactNativeTypes';
+import type {ReactFabricType, HostComponent} from './ReactNativeTypes';
 import type {ReactNodeList} from 'shared/ReactTypes';
 
 import './ReactFabricInjection';
@@ -26,7 +26,7 @@ import {
 } from 'react-reconciler/inline.fabric';
 
 import {createPortal} from 'shared/ReactPortal';
-import {setBatchingImplementation} from 'events/ReactGenericBatching';
+import {setBatchingImplementation} from 'legacy-events/ReactGenericBatching';
 import ReactVersion from 'shared/ReactVersion';
 
 import NativeMethodsMixin from './NativeMethodsMixin';
@@ -39,7 +39,57 @@ import ReactSharedInternals from 'shared/ReactSharedInternals';
 import getComponentName from 'shared/getComponentName';
 import warningWithoutStack from 'shared/warningWithoutStack';
 
+const {dispatchCommand: fabricDispatchCommand} = nativeFabricUIManager;
+
 const ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
+
+function findHostInstance_DEPRECATED(
+  componentOrHandle: any,
+): ?React$ElementRef<HostComponent<mixed>> {
+  if (__DEV__) {
+    const owner = ReactCurrentOwner.current;
+    if (owner !== null && owner.stateNode !== null) {
+      warningWithoutStack(
+        owner.stateNode._warnedAboutRefsInRender,
+        '%s is accessing findNodeHandle inside its render(). ' +
+          'render() should be a pure function of props and state. It should ' +
+          'never access something that requires stale data from the previous ' +
+          'render, such as refs. Move this logic to componentDidMount and ' +
+          'componentDidUpdate instead.',
+        getComponentName(owner.type) || 'A component',
+      );
+
+      owner.stateNode._warnedAboutRefsInRender = true;
+    }
+  }
+  if (componentOrHandle == null) {
+    return null;
+  }
+  if (componentOrHandle._nativeTag) {
+    return componentOrHandle;
+  }
+  if (componentOrHandle.canonical && componentOrHandle.canonical._nativeTag) {
+    return componentOrHandle.canonical;
+  }
+  let hostInstance;
+  if (__DEV__) {
+    hostInstance = findHostInstanceWithWarning(
+      componentOrHandle,
+      'findHostInstance_DEPRECATED',
+    );
+  } else {
+    hostInstance = findHostInstance(componentOrHandle);
+  }
+
+  if (hostInstance == null) {
+    return hostInstance;
+  }
+  if ((hostInstance: any).canonical) {
+    // Fabric
+    return (hostInstance: any).canonical;
+  }
+  return hostInstance;
+}
 
 function findNodeHandle(componentOrHandle: any): ?number {
   if (__DEV__) {
@@ -105,15 +155,29 @@ const roots = new Map();
 const ReactFabric: ReactFabricType = {
   NativeComponent: ReactNativeComponent(findNodeHandle, findHostInstance),
 
+  // This is needed for implementation details of TouchableNativeFeedback
+  // Remove this once TouchableNativeFeedback doesn't use cloneElement
+  findHostInstance_DEPRECATED,
   findNodeHandle,
 
-  setNativeProps(handle: any, nativeProps: Object) {
-    warningWithoutStack(
-      false,
-      'Warning: setNativeProps is not currently supported in Fabric',
-    );
+  dispatchCommand(handle: any, command: string, args: Array<any>) {
+    const invalid =
+      handle._nativeTag == null || handle._internalInstanceHandle == null;
 
-    return;
+    if (invalid) {
+      warningWithoutStack(
+        !invalid,
+        "dispatchCommand was called with a ref that isn't a " +
+          'native component. Use React.forwardRef to get access to the underlying native component',
+      );
+      return;
+    }
+
+    fabricDispatchCommand(
+      handle._internalInstanceHandle.stateNode.node,
+      command,
+      args,
+    );
   },
 
   render(element: React$Element<any>, containerTag: any, callback: ?Function) {
@@ -122,7 +186,7 @@ const ReactFabric: ReactFabricType = {
     if (!root) {
       // TODO (bvaughn): If we decide to keep the wrapper component,
       // We could create a wrapper for containerTag as well to reduce special casing.
-      root = createContainer(containerTag, LegacyRoot, false);
+      root = createContainer(containerTag, LegacyRoot, false, null);
       roots.set(containerTag, root);
     }
     updateContainer(element, root, null, callback);

@@ -19,7 +19,10 @@ import warning from 'shared/warning';
 import is from 'shared/objectIs';
 
 import type {Dispatcher as DispatcherType} from 'react-reconciler/src/ReactFiberHooks';
-import type {ReactContext} from 'shared/ReactTypes';
+import type {
+  ReactContext,
+  ReactEventResponderListener,
+} from 'shared/ReactTypes';
 import type {ReactElement} from 'shared/ReactElementType';
 
 type BasicStateAction<S> = (S => S) | S;
@@ -366,6 +369,31 @@ class ReactShallowRenderer {
       return fn;
     };
 
+    const useResponder = (
+      responder,
+      props,
+    ): ReactEventResponderListener<any, any> => ({
+      props: props,
+      responder,
+    });
+
+    // TODO: implement if we decide to keep the shallow renderer
+    const useTransition = (
+      config,
+    ): [(callback: () => void) => void, boolean] => {
+      this._validateCurrentlyRenderingComponent();
+      const startTransition = callback => {
+        callback();
+      };
+      return [startTransition, false];
+    };
+
+    // TODO: implement if we decide to keep the shallow renderer
+    const useDeferredValue = <T>(value: T, config): T => {
+      this._validateCurrentlyRenderingComponent();
+      return value;
+    };
+
     return {
       readContext,
       useCallback: (identity: any),
@@ -381,6 +409,9 @@ class ReactShallowRenderer {
       useReducer,
       useRef,
       useState,
+      useResponder,
+      useTransition,
+      useDeferredValue,
     };
   }
 
@@ -511,7 +542,7 @@ class ReactShallowRenderer {
     );
     invariant(
       isForwardRef(element) ||
-        (typeof element.type === 'function' || isMemo(element.type)),
+        (typeof element.type === 'function' || isMemo(element)),
       'ReactShallowRenderer render(): Shallow rendering works only with custom ' +
         'components, but the provided element type was `%s`.',
       Array.isArray(element.type)
@@ -528,7 +559,7 @@ class ReactShallowRenderer {
       this._reset();
     }
 
-    const elementType = isMemo(element.type) ? element.type.type : element.type;
+    const elementType = isMemo(element) ? element.type.type : element.type;
     const previousElement = this._element;
 
     this._rendering = true;
@@ -536,7 +567,7 @@ class ReactShallowRenderer {
     this._context = getMaskedContext(elementType.contextTypes, context);
 
     // Inner memo component props aren't currently validated in createElement.
-    if (isMemo(element.type) && elementType.propTypes) {
+    if (isMemo(element) && elementType.propTypes) {
       currentlyValidatingElement = element;
       checkPropTypes(
         elementType.propTypes,
@@ -587,7 +618,7 @@ class ReactShallowRenderer {
         this._mountClassComponent(elementType, element, this._context);
       } else {
         let shouldRender = true;
-        if (isMemo(element.type) && previousElement !== null) {
+        if (isMemo(element) && previousElement !== null) {
           // This is a Memo component that is being re-rendered.
           const compare = element.type.compare || shallowEqual;
           if (compare(previousElement.props, element.props)) {
@@ -776,7 +807,7 @@ function getDisplayName(element) {
   } else if (typeof element.type === 'string') {
     return element.type;
   } else {
-    const elementType = isMemo(element.type) ? element.type.type : element.type;
+    const elementType = isMemo(element) ? element.type.type : element.type;
     return elementType.displayName || elementType.name || 'Unknown';
   }
 }

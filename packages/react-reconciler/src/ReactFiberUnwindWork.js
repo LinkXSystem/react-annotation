@@ -9,6 +9,7 @@
 
 import type {Fiber} from './ReactFiber';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
+import type {SuspenseState} from './ReactFiberSuspenseComponent';
 
 import {
   ClassComponent,
@@ -17,18 +18,14 @@ import {
   HostPortal,
   ContextProvider,
   SuspenseComponent,
-  DehydratedSuspenseComponent,
-  EventComponent,
-  EventTarget,
+  SuspenseListComponent,
 } from 'shared/ReactWorkTags';
 import {DidCapture, NoEffect, ShouldCapture} from 'shared/ReactSideEffectTags';
-import {
-  enableSuspenseServerRenderer,
-  enableEventAPI,
-} from 'shared/ReactFeatureFlags';
+import {enableSuspenseServerRenderer} from 'shared/ReactFeatureFlags';
 
 import {popHostContainer, popHostContext} from './ReactFiberHostContext';
 import {popSuspenseContext} from './ReactFiberSuspenseContext';
+import {resetHydrationState} from './ReactFiberHydrationContext';
 import {
   isContextProvider as isLegacyContextProvider,
   popContext as popLegacyContext,
@@ -74,6 +71,18 @@ function unwindWork(
     }
     case SuspenseComponent: {
       popSuspenseContext(workInProgress);
+      if (enableSuspenseServerRenderer) {
+        const suspenseState: null | SuspenseState =
+          workInProgress.memoizedState;
+        if (suspenseState !== null && suspenseState.dehydrated !== null) {
+          invariant(
+            workInProgress.alternate !== null,
+            'Threw in newly mounted dehydrated component. This is likely a bug in ' +
+              'React. Please file an issue.',
+          );
+          resetHydrationState();
+        }
+      }
       const effectTag = workInProgress.effectTag;
       if (effectTag & ShouldCapture) {
         workInProgress.effectTag = (effectTag & ~ShouldCapture) | DidCapture;
@@ -82,17 +91,10 @@ function unwindWork(
       }
       return null;
     }
-    case DehydratedSuspenseComponent: {
-      if (enableSuspenseServerRenderer) {
-        // TODO: popHydrationState
-        popSuspenseContext(workInProgress);
-        const effectTag = workInProgress.effectTag;
-        if (effectTag & ShouldCapture) {
-          workInProgress.effectTag = (effectTag & ~ShouldCapture) | DidCapture;
-          // Captured a suspense effect. Re-render the boundary.
-          return workInProgress;
-        }
-      }
+    case SuspenseListComponent: {
+      popSuspenseContext(workInProgress);
+      // SuspenseList doesn't actually catch anything. It should've been
+      // caught by a nested boundary. If not, it should bubble through.
       return null;
     }
     case HostPortal:
@@ -100,12 +102,6 @@ function unwindWork(
       return null;
     case ContextProvider:
       popProvider(workInProgress);
-      return null;
-    case EventComponent:
-    case EventTarget:
-      if (enableEventAPI) {
-        popHostContext(workInProgress);
-      }
       return null;
     default:
       return null;
@@ -136,20 +132,11 @@ function unwindInterruptedWork(interruptedWork: Fiber) {
     case SuspenseComponent:
       popSuspenseContext(interruptedWork);
       break;
-    case DehydratedSuspenseComponent:
-      if (enableSuspenseServerRenderer) {
-        // TODO: popHydrationState
-        popSuspenseContext(interruptedWork);
-      }
+    case SuspenseListComponent:
+      popSuspenseContext(interruptedWork);
       break;
     case ContextProvider:
       popProvider(interruptedWork);
-      break;
-    case EventComponent:
-    case EventTarget:
-      if (enableEventAPI) {
-        popHostContext(interruptedWork);
-      }
       break;
     default:
       break;

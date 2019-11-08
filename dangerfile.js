@@ -32,6 +32,14 @@ const {generateResultsArray} = require('./scripts/rollup/stats');
 const {existsSync, readFileSync} = require('fs');
 const {exec} = require('child_process');
 
+// This must match the name of the CI job that creates the build artifacts
+const RELEASE_CHANNEL =
+  process.env.RELEASE_CHANNEL === 'experimental' ? 'experimental' : 'stable';
+const artifactsJobName =
+  process.env.RELEASE_CHANNEL === 'experimental'
+    ? 'process_artifacts_experimental'
+    : 'process_artifacts';
+
 if (!existsSync('./build/bundle-sizes.json')) {
   // This indicates the build failed previously.
   // In that case, there's nothing for the Dangerfile to do.
@@ -117,6 +125,8 @@ function git(args) {
     return;
   }
 
+  markdown(`## Size changes (${RELEASE_CHANNEL})`);
+
   const upstreamRef = danger.github.pr.base.ref;
   await git(`remote add upstream https://github.com/facebook/react.git`);
   await git('fetch upstream');
@@ -126,21 +136,24 @@ function git(args) {
   try {
     let baseCIBuildId = null;
     const statusesResponse = await fetch(
-      `https://api.github.com/repos/facebook/react/commits/${baseCommit}/statuses`
+      `https://api.github.com/repos/facebook/react/commits/${baseCommit}/status`
     );
-    const statuses = await statusesResponse.json();
+    const {statuses, state} = await statusesResponse.json();
+    if (state === 'failure') {
+      warn(`Base commit is broken: ${baseCommit}`);
+      return;
+    }
     for (let i = 0; i < statuses.length; i++) {
       const status = statuses[i];
-      // This must match the name of the CI job that creates the build artifacts
-      if (status.context === 'ci/circleci: build') {
+      if (status.context === `ci/circleci: ${artifactsJobName}`) {
         if (status.state === 'success') {
           baseCIBuildId = /\/facebook\/react\/([0-9]+)/.exec(
             status.target_url
           )[1];
           break;
         }
-        if (status.state === 'failure') {
-          warn(`Base commit is broken: ${baseCommit}`);
+        if (status.state === 'pending') {
+          warn(`Build job for base commit is still pending: ${baseCommit}`);
           return;
         }
       }

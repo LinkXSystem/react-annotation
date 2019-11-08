@@ -397,13 +397,19 @@ export default {
             });
           }
 
-          // Ignore references to the function itself as it's not defined yet.
           const def = reference.resolved.defs[0];
-          if (
-            def != null &&
-            def.node != null &&
-            def.node.init === node.parent
-          ) {
+
+          if (def == null) {
+            continue;
+          }
+
+          // Ignore references to the function itself as it's not defined yet.
+          if (def.node != null && def.node.init === node.parent) {
+            continue;
+          }
+
+          // Ignore Flow type parameters
+          if (def.type === 'TypeParameter') {
             continue;
           }
 
@@ -1144,7 +1150,7 @@ function collectRecommendations({
   let unnecessaryDependencies = new Set();
   let duplicateDependencies = new Set();
   declaredDependencies.forEach(({key}) => {
-    // Does this declared dep satsify a real need?
+    // Does this declared dep satisfy a real need?
     if (satisfyingDependencies.has(key)) {
       if (suggestedDependencies.indexOf(key) === -1) {
         // Good one.

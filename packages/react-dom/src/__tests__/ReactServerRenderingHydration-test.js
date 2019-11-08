@@ -362,20 +362,16 @@ describe('ReactDOMServerHydration', () => {
     const element = document.createElement('div');
     expect(() => {
       element.innerHTML = ReactDOMServer.renderToString(markup);
-    }).toLowPriorityWarnDev(
-      ['componentWillMount() is deprecated and will be removed'],
-      {withoutStack: true},
-    );
+    }).toLowPriorityWarnDev(['componentWillMount has been renamed'], {
+      withoutStack: true,
+    });
     expect(element.textContent).toBe('Hi');
 
     expect(() => {
-      expect(() => ReactDOM.hydrate(markup, element)).toWarnDev(
-        'Please update the following components to use componentDidMount instead: ComponentWithWarning',
-      );
-    }).toLowPriorityWarnDev(
-      ['componentWillMount is deprecated and will be removed'],
-      {withoutStack: true},
-    );
+      ReactDOM.hydrate(markup, element);
+    }).toLowPriorityWarnDev(['componentWillMount has been renamed'], {
+      withoutStack: true,
+    });
     expect(element.textContent).toBe('Hi');
   });
 
@@ -500,7 +496,67 @@ describe('ReactDOMServerHydration', () => {
 
     jest.runAllTimers();
     await Promise.resolve();
-    Scheduler.flushAll();
+    Scheduler.unstable_flushAll();
     expect(element.textContent).toBe('Hello world');
+  });
+
+  it.experimental(
+    'does not re-enter hydration after committing the first one',
+    () => {
+      let finalHTML = ReactDOMServer.renderToString(<div />);
+      let container = document.createElement('div');
+      container.innerHTML = finalHTML;
+      let root = ReactDOM.createRoot(container, {hydrate: true});
+      root.render(<div />);
+      Scheduler.unstable_flushAll();
+      root.render(null);
+      Scheduler.unstable_flushAll();
+      // This should not reenter hydration state and therefore not trigger hydration
+      // warnings.
+      root.render(<div />);
+      Scheduler.unstable_flushAll();
+    },
+  );
+
+  it('Suspense + hydration in legacy mode', () => {
+    const element = document.createElement('div');
+    element.innerHTML = '<div>Hello World</div>';
+    let div = element.firstChild;
+    let ref = React.createRef();
+    expect(() =>
+      ReactDOM.hydrate(
+        <React.Suspense fallback={null}>
+          <div ref={ref}>Hello World</div>
+        </React.Suspense>,
+        element,
+      ),
+    ).toWarnDev(
+      'Warning: Did not expect server HTML to contain a <div> in <div>.',
+      {withoutStack: true},
+    );
+
+    // The content should've been client rendered and replaced the
+    // existing div.
+    expect(ref.current).not.toBe(div);
+    // The HTML should be the same though.
+    expect(element.innerHTML).toBe('<div>Hello World</div>');
+  });
+
+  it('Suspense + hydration in legacy mode with no fallback', () => {
+    const element = document.createElement('div');
+    element.innerHTML = '<div>Hello World</div>';
+    let div = element.firstChild;
+    let ref = React.createRef();
+    ReactDOM.hydrate(
+      <React.Suspense>
+        <div ref={ref}>Hello World</div>
+      </React.Suspense>,
+      element,
+    );
+
+    // Because this didn't have a fallback, it was hydrated as if it's
+    // not a Suspense boundary.
+    expect(ref.current).toBe(div);
+    expect(element.innerHTML).toBe('<div>Hello World</div>');
   });
 });

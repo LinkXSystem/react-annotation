@@ -22,6 +22,32 @@ aliases:
   - &attach_workspace
     at: build
 
+  - &process_artifacts
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      - run: node ./scripts/rollup/consolidateBundleSizes.js
+      - run: ./scripts/circleci/upload_build.sh
+      - run: ./scripts/circleci/pack_and_store_artifact.sh
+      - store_artifacts:
+          path: ./node_modules.tgz
+      - store_artifacts:
+          path: ./build.tgz
+      - store_artifacts:
+          path: ./build/bundle-sizes.json
+      - store_artifacts:
+          # TODO: Update release script to use local file instead of pulling
+          # from artifacts.
+          path: ./scripts/error-codes/codes.json
+      - persist_to_workspace:
+          root: build
+          paths:
+            - bundle-sizes.json
+
 jobs:
   setup:
     docker: *docker
@@ -72,7 +98,22 @@ jobs:
       - checkout
       - *restore_yarn_cache
       - *run_yarn
-      - run: yarn test --maxWorkers=2
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test --maxWorkers=2
+
+  test_source_experimental:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - *restore_yarn_cache
+      - *run_yarn
+      - run:
+          environment:
+            RELEASE_CHANNEL: experimental
+          command: yarn test --maxWorkers=2
 
   test_source_persistent:
     docker: *docker
@@ -82,7 +123,10 @@ jobs:
       - checkout
       - *restore_yarn_cache
       - *run_yarn
-      - run: yarn test-persistent --maxWorkers=2
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test-persistent --maxWorkers=2
 
   test_source_prod:
     docker: *docker
@@ -92,60 +136,69 @@ jobs:
       - checkout
       - *restore_yarn_cache
       - *run_yarn
-      - run: yarn test-prod --maxWorkers=2
-
-  test_source_fire:
-    docker: *docker
-    environment: *environment
-
-    steps:
-      - checkout
-      - *restore_yarn_cache
-      - *run_yarn
-      - run: yarn test-fire --maxWorkers=2
-      - run: yarn test-fire-prod --maxWorkers=2
-
-  test_coverage:
-    docker: *docker
-    environment: *environment
-
-    steps:
-      - checkout
-      - *restore_yarn_cache
-      - *run_yarn
-      - run: ./scripts/circleci/test_coverage.sh
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test-prod --maxWorkers=2
 
   build:
     docker: *docker
     environment: *environment
+    parallelism: 20
     steps:
       - checkout
       - *restore_yarn_cache
       - *run_yarn
-      - run: ./scripts/circleci/add_build_info_json.sh
-      - run: ./scripts/circleci/update_package_versions.sh
-      - run: ./scripts/circleci/build.sh
-      - run: cp ./scripts/rollup/results.json ./build/bundle-sizes.json
-      - run: ./scripts/circleci/upload_build.sh
-      - run: ./scripts/circleci/pack_and_store_artifact.sh
-      - store_artifacts:
-          path: ./node_modules.tgz
-      - store_artifacts:
-          path: ./build.tgz
-      - store_artifacts:
-          path: ./build/bundle-sizes.json
-      - store_artifacts:
-          path: ./scripts/error-codes/codes.json
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: |
+            ./scripts/circleci/add_build_info_json.sh
+            ./scripts/circleci/update_package_versions.sh
+            yarn build
+      - run: echo "stable" >> build/RELEASE_CHANNEL
       - persist_to_workspace:
           root: build
           paths:
+            - RELEASE_CHANNEL
             - facebook-www
             - node_modules
             - react-native
-            - bundle-sizes.json
+            - dist
+            - sizes/*.json
+
+  build_experimental:
+    docker: *docker
+    environment: *environment
+    parallelism: 20
+    steps:
+      - checkout
+      - *restore_yarn_cache
+      - *run_yarn
+      - run:
+          environment:
+            RELEASE_CHANNEL: experimental
+          command: |
+            ./scripts/circleci/add_build_info_json.sh
+            ./scripts/circleci/update_package_versions.sh
+            yarn build
+      - run: echo "experimental" >> build/RELEASE_CHANNEL
+      - persist_to_workspace:
+          root: build
+          paths:
+            - RELEASE_CHANNEL
+            - facebook-www
+            - node_modules
+            - react-native
+            - dist
+            - sizes/*.json
+
+  # These jobs are named differently so we can distinguish the stable and
+  # and experimental artifacts
+  process_artifacts: *process_artifacts
+  process_artifacts_experimental: *process_artifacts
 
   sizebot:
-    build:
     docker: *docker
     environment: *environment
     steps:
@@ -153,7 +206,40 @@ jobs:
       - attach_workspace: *attach_workspace
       - *restore_yarn_cache
       - *run_yarn
-      - run: node ./scripts/tasks/danger
+      # This runs in the process_artifacts job, too, but it's faster to run
+      # this step in both jobs instead of running the jobs sequentially
+      - run: node ./scripts/rollup/consolidateBundleSizes.js
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: node ./scripts/tasks/danger
+
+  sizebot_experimental:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      # This runs in the process_artifacts job, too, but it's faster to run
+      # this step in both jobs instead of running the jobs sequentially
+      - run: node ./scripts/rollup/consolidateBundleSizes.js
+      - run:
+          environment:
+            RELEASE_CHANNEL: experimental
+          command: node ./scripts/tasks/danger
+
+  lint_build:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      - run: yarn lint-build
+      - run: scripts/circleci/check_minified_errors.sh
 
   test_build:
     docker: *docker
@@ -163,7 +249,53 @@ jobs:
       - attach_workspace: *attach_workspace
       - *restore_yarn_cache
       - *run_yarn
-      - run: yarn test-build --maxWorkers=2
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test-build --maxWorkers=2
+
+  test_build_experimental:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      - run:
+          environment:
+            RELEASE_CHANNEL: experimental
+          command: yarn test-build --maxWorkers=2
+
+  test_build_devtools:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test-build --maxWorkers=2
+
+  test_dom_fixtures:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - run:
+          name: Run DOM fixture tests
+          environment:
+            RELEASE_CHANNEL: stable
+          command: |
+            cd fixtures/dom
+            yarn --frozen-lockfile
+            yarn prestart
+            yarn test --maxWorkers=2
 
   test_fuzz:
     docker: *docker
@@ -175,10 +307,8 @@ jobs:
       - run:
           name: Run fuzz tests
           command: |
-            FUZZ_TEST_SEED=$RANDOM
-            echo $FUZZ_TEST_SEED
-            yarn test fuzz --maxWorkers=2
-            yarn test-prod fuzz --maxWorkers=2
+            FUZZ_TEST_SEED=$RANDOM yarn test fuzz --maxWorkers=2
+            FUZZ_TEST_SEED=$RANDOM yarn test-prod fuzz --maxWorkers=2
 
   test_build_prod:
     docker: *docker
@@ -188,11 +318,27 @@ jobs:
       - attach_workspace: *attach_workspace
       - *restore_yarn_cache
       - *run_yarn
-      - run: yarn test-build-prod --maxWorkers=2
+      - run:
+          environment:
+            RELEASE_CHANNEL: stable
+          command: yarn test-build-prod --maxWorkers=2
+
+  test_build_prod_experimental:
+    docker: *docker
+    environment: *environment
+    steps:
+      - checkout
+      - attach_workspace: *attach_workspace
+      - *restore_yarn_cache
+      - *run_yarn
+      - run:
+          environment:
+            RELEASE_CHANNEL: experimental
+          command: yarn test-build-prod --maxWorkers=2
 
 workflows:
   version: 2
-  commit:
+  stable:
     jobs:
       - setup
       - lint:
@@ -210,16 +356,16 @@ workflows:
       - test_source_persistent:
           requires:
             - setup
-      - test_source_fire:
-          requires:
-            - setup
-      - test_coverage:
-          requires:
-            - setup
       - build:
           requires:
             - setup
+      - process_artifacts:
+          requires:
+            - build
       - sizebot:
+          requires:
+            - build
+      - lint_build:
           requires:
             - build
       - test_build:
@@ -228,9 +374,42 @@ workflows:
       - test_build_prod:
           requires:
             - build
-  hourly:
+      - test_build_devtools:
+          requires:
+            - build
+      - test_dom_fixtures:
+          requires:
+            - build
+
+  experimental:
+    jobs:
+      - setup
+      - test_source_experimental:
+          requires:
+            - setup
+      - build_experimental:
+          requires:
+            - setup
+      - process_artifacts_experimental:
+          requires:
+            - build_experimental
+      - sizebot_experimental:
+          requires:
+            - build_experimental
+      - test_build_experimental:
+          requires:
+            - build_experimental
+      - test_build_prod_experimental:
+          requires:
+            - build_experimental
+      - lint_build:
+          requires:
+            - build_experimental
+
+  fuzz_tests:
     triggers:
       - schedule:
+          # Fuzz tests run hourly
           cron: "0 * * * *"
           filters:
             branches:

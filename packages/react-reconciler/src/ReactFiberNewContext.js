@@ -12,12 +12,7 @@ import type {Fiber} from './ReactFiber';
 import type {StackCursor} from './ReactFiberStack';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
 
-export type ContextDependencyList = {
-  first: ContextDependency<mixed>,
-  expirationTime: ExpirationTime,
-};
-
-type ContextDependency<T> = {
+export type ContextDependency<T> = {
   context: ReactContext<T>,
   observedBits: number,
   next: ContextDependency<mixed> | null,
@@ -30,7 +25,7 @@ import MAX_SIGNED_31_BIT_INT from './maxSigned31BitInt';
 import {
   ContextProvider,
   ClassComponent,
-  DehydratedSuspenseComponent,
+  DehydratedFragment,
 } from 'shared/ReactWorkTags';
 
 import invariant from 'shared/invariant';
@@ -155,7 +150,7 @@ export function calculateChangedBits<T>(
   }
 }
 
-function scheduleWorkOnParentPath(
+export function scheduleWorkOnParentPath(
   parent: Fiber | null,
   renderExpirationTime: ExpirationTime,
 ) {
@@ -201,11 +196,11 @@ export function propagateContextChange(
     let nextFiber;
 
     // Visit this fiber.
-    const list = fiber.contextDependencies;
+    const list = fiber.dependencies;
     if (list !== null) {
       nextFiber = fiber.child;
 
-      let dependency = list.first;
+      let dependency = list.firstContext;
       while (dependency !== null) {
         // Check if the context matches.
         if (
@@ -254,15 +249,20 @@ export function propagateContextChange(
       nextFiber = fiber.type === workInProgress.type ? null : fiber.child;
     } else if (
       enableSuspenseServerRenderer &&
-      fiber.tag === DehydratedSuspenseComponent
+      fiber.tag === DehydratedFragment
     ) {
-      // If a dehydrated suspense component is in this subtree, we don't know
+      // If a dehydrated suspense bounudary is in this subtree, we don't know
       // if it will have any context consumers in it. The best we can do is
-      // mark it as having updates on its children.
-      if (fiber.expirationTime < renderExpirationTime) {
-        fiber.expirationTime = renderExpirationTime;
+      // mark it as having updates.
+      let parentSuspense = fiber.return;
+      invariant(
+        parentSuspense !== null,
+        'We just came from a parent so we must have had a parent. This is a bug in React.',
+      );
+      if (parentSuspense.expirationTime < renderExpirationTime) {
+        parentSuspense.expirationTime = renderExpirationTime;
       }
-      let alternate = fiber.alternate;
+      let alternate = parentSuspense.alternate;
       if (
         alternate !== null &&
         alternate.expirationTime < renderExpirationTime
@@ -273,7 +273,7 @@ export function propagateContextChange(
       // because we want to schedule this fiber as having work
       // on its children. We'll use the childExpirationTime on
       // this fiber to indicate that a context has changed.
-      scheduleWorkOnParentPath(fiber, renderExpirationTime);
+      scheduleWorkOnParentPath(parentSuspense, renderExpirationTime);
       nextFiber = fiber.sibling;
     } else {
       // Traverse down.
@@ -315,17 +315,18 @@ export function prepareToReadContext(
   lastContextDependency = null;
   lastContextWithAllBitsObserved = null;
 
-  const currentDependencies = workInProgress.contextDependencies;
-  if (
-    currentDependencies !== null &&
-    currentDependencies.expirationTime >= renderExpirationTime
-  ) {
-    // Context list has a pending update. Mark that this fiber performed work.
-    markWorkInProgressReceivedUpdate();
+  const dependencies = workInProgress.dependencies;
+  if (dependencies !== null) {
+    const firstContext = dependencies.firstContext;
+    if (firstContext !== null) {
+      if (dependencies.expirationTime >= renderExpirationTime) {
+        // Context list has a pending update. Mark that this fiber performed work.
+        markWorkInProgressReceivedUpdate();
+      }
+      // Reset the work-in-progress list
+      dependencies.firstContext = null;
+    }
   }
-
-  // Reset the work-in-progress list
-  workInProgress.contextDependencies = null;
 }
 
 export function readContext<T>(
@@ -378,9 +379,10 @@ export function readContext<T>(
 
       // This is the first dependency for this component. Create a new list.
       lastContextDependency = contextItem;
-      currentlyRenderingFiber.contextDependencies = {
-        first: contextItem,
+      currentlyRenderingFiber.dependencies = {
         expirationTime: NoWork,
+        firstContext: contextItem,
+        responders: null,
       };
     } else {
       // Append a new context item.

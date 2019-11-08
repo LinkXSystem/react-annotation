@@ -9,6 +9,7 @@
 const fs = require('fs');
 const evalToString = require('../shared/evalToString');
 const invertObject = require('./invertObject');
+const helperModuleImports = require('@babel/helper-module-imports');
 
 module.exports = function(babel) {
   const t = babel.types;
@@ -28,11 +29,11 @@ module.exports = function(babel) {
           // into this:
           //
           // if (!condition) {
-          //   if (__DEV__) {
-          //     throw ReactError(`A ${adj} message that contains ${noun}`);
-          //   } else {
-          //     throw ReactErrorProd(ERR_CODE, adj, noun);
-          //   }
+          //   throw Error(
+          //     __DEV__
+          //       ? `A ${adj} message that contains ${noun}`
+          //       : formatProdErrorMessage(ERR_CODE, adj, noun)
+          //   );
           // }
           //
           // where ERR_CODE is an error code: a unique identifier (a number
@@ -45,20 +46,40 @@ module.exports = function(babel) {
             .split('%s')
             .map(raw => t.templateElement({raw, cooked: String.raw({raw})}));
 
-          // Import ReactError
-          const reactErrorIdentfier = file.addImport(
-            'shared/ReactError',
-            'default',
-            'ReactError'
+          // Outputs:
+          //   `A ${adj} message that contains ${noun}`;
+          const devMessage = t.templateLiteral(
+            errorMsgQuasis,
+            errorMsgExpressions
           );
 
-          // Outputs:
-          //   throw ReactError(`A ${adj} message that contains ${noun}`);
-          const devThrow = t.throwStatement(
-            t.callExpression(reactErrorIdentfier, [
-              t.templateLiteral(errorMsgQuasis, errorMsgExpressions),
-            ])
-          );
+          const parentStatementPath = path.parentPath;
+          if (parentStatementPath.type !== 'ExpressionStatement') {
+            throw path.buildCodeFrameError(
+              'invariant() cannot be called from expression context. Move ' +
+                'the call to its own statement.'
+            );
+          }
+
+          if (noMinify) {
+            // Error minification is disabled for this build.
+            //
+            // Outputs:
+            //   if (!condition) {
+            //     throw Error(`A ${adj} message that contains ${noun}`);
+            //   }
+            parentStatementPath.replaceWith(
+              t.ifStatement(
+                t.unaryExpression('!', condition),
+                t.blockStatement([
+                  t.throwStatement(
+                    t.callExpression(t.identifier('Error'), [devMessage])
+                  ),
+                ])
+              )
+            );
+            return;
+          }
 
           // Avoid caching because we write it as we go.
           const existingErrorMap = JSON.parse(
@@ -67,58 +88,72 @@ module.exports = function(babel) {
           const errorMap = invertObject(existingErrorMap);
 
           let prodErrorId = errorMap[errorMsgLiteral];
-          if (prodErrorId === undefined || noMinify) {
-            // There is no error code for this message. We use a lint rule to
-            // enforce that messages can be minified, so assume this is
-            // intentional and exit gracefully.
+
+          if (prodErrorId === undefined) {
+            // There is no error code for this message. Add an inline comment
+            // that flags this as an unminified error. This allows the build
+            // to proceed, while also allowing a post-build linter to detect it.
             //
             // Outputs:
+            //   /* FIXME (minify-errors-in-prod): Unminified error message in production build! */
             //   if (!condition) {
-            //     throw ReactError(`A ${adj} message that contains ${noun}`);
+            //     throw Error(`A ${adj} message that contains ${noun}`);
             //   }
-            path.replaceWith(
+            parentStatementPath.replaceWith(
               t.ifStatement(
                 t.unaryExpression('!', condition),
-                t.blockStatement([devThrow])
+                t.blockStatement([
+                  t.throwStatement(
+                    t.callExpression(t.identifier('Error'), [devMessage])
+                  ),
+                ])
               )
+            );
+            parentStatementPath.addComment(
+              'leading',
+              'FIXME (minify-errors-in-prod): Unminified error message in production build!'
             );
             return;
           }
           prodErrorId = parseInt(prodErrorId, 10);
 
           // Import ReactErrorProd
-          const reactErrorProdIdentfier = file.addImport(
-            'shared/ReactErrorProd',
-            'default',
-            'ReactErrorProd'
+          const formatProdErrorMessageIdentifier = helperModuleImports.addDefault(
+            path,
+            'shared/formatProdErrorMessage',
+            {nameHint: 'formatProdErrorMessage'}
           );
 
           // Outputs:
-          //   throw ReactErrorProd(ERR_CODE, adj, noun);
-          const prodThrow = t.throwStatement(
-            t.callExpression(reactErrorProdIdentfier, [
-              t.numericLiteral(prodErrorId),
-              ...errorMsgExpressions,
-            ])
+          //   formatProdErrorMessage(ERR_CODE, adj, noun);
+          const prodMessage = t.callExpression(
+            formatProdErrorMessageIdentifier,
+            [t.numericLiteral(prodErrorId), ...errorMsgExpressions]
           );
 
           // Outputs:
-          //   if (!condition) {
-          //     if (__DEV__) {
-          //       throw ReactError(`A ${adj} message that contains ${noun}`);
-          //     } else {
-          //       throw ReactErrorProd(ERR_CODE, adj, noun);
-          //     }
-          //   }
-          path.replaceWith(
+          // if (!condition) {
+          //   throw Error(
+          //     __DEV__
+          //       ? `A ${adj} message that contains ${noun}`
+          //       : formatProdErrorMessage(ERR_CODE, adj, noun)
+          //   );
+          // }
+          parentStatementPath.replaceWith(
             t.ifStatement(
               t.unaryExpression('!', condition),
               t.blockStatement([
-                t.ifStatement(
-                  DEV_EXPRESSION,
-                  t.blockStatement([devThrow]),
-                  t.blockStatement([prodThrow])
-                ),
+                t.blockStatement([
+                  t.throwStatement(
+                    t.callExpression(t.identifier('Error'), [
+                      t.conditionalExpression(
+                        DEV_EXPRESSION,
+                        devMessage,
+                        prodMessage
+                      ),
+                    ])
+                  ),
+                ]),
               ])
             )
           );

@@ -12,15 +12,10 @@ import typeof * as FeatureFlagsShimType from './ReactFeatureFlags.www';
 
 // Re-export dynamic flags from the www version.
 export const {
-  debugRenderPhaseSideEffects,
   debugRenderPhaseSideEffectsForStrictMode,
-  replayFailedUnitOfWorkWithInvokeGuardedCallback,
-  warnAboutDeprecatedLifecycles,
-  disableYielding,
   disableInputAttributeSyncing,
-  warnAboutShorthandPropertyCollision,
-  warnAboutDeprecatedSetNativeProps,
-  revertPassiveEffectsChange,
+  enableTrustedTypesIntegration,
+  enableSelectiveHydration,
 } = require('ReactFeatureFlags');
 
 // In www, we have experimental support for gathering data
@@ -35,7 +30,15 @@ export const enableProfilerTimer = __PROFILE__;
 export const enableSchedulerTracing = __PROFILE__;
 export const enableSchedulerDebugging = true;
 
-export const enableStableConcurrentModeAPIs = false;
+export const replayFailedUnitOfWorkWithInvokeGuardedCallback = false;
+export const warnAboutDeprecatedLifecycles = true;
+export const warnAboutShorthandPropertyCollision = false;
+export const disableLegacyContext = false;
+export const warnAboutStringRefs = false;
+export const warnAboutDefaultPropsOnFunctionComponents = false;
+export const disableSchedulerTimeoutBasedOnReactExpirationTime = false;
+
+export const exposeConcurrentModeAPIs = __EXPERIMENTAL__;
 
 export const enableSuspenseServerRenderer = true;
 
@@ -68,11 +71,19 @@ function updateFlagOutsideOfReactCallStack() {
   }
 }
 
-export const enableEventAPI = true;
+export const enableFlareAPI = true;
+
+export const enableFundamentalAPI = false;
+
+export const enableScopeAPI = true;
 
 export const enableJSXTransformAPI = true;
 
-export const warnAboutMissingMockScheduler = true;
+export const warnAboutUnmockedScheduler = true;
+
+export const enableSuspenseCallback = true;
+
+export const flushSuspenseFallbacksInTests = true;
 
 // Flow magic to verify the exports of this file match the original version.
 // eslint-disable-next-line no-unused-vars
