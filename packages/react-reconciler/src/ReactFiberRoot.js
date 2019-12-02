@@ -132,6 +132,7 @@ function FiberRootNode(containerInfo, tag, hydrate) {
   }
 }
 
+// TODO：ReactDOM 通过此方法创建 Fiber 
 export function createFiberRoot(
   containerInfo: any,
   tag: RootTag,

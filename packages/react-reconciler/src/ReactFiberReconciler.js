@@ -215,6 +215,7 @@ function findHostInstanceWithWarning(
   return findHostInstance(component);
 }
 
+// TODO：ReactDOM 通过此方法创建 Fiber 
 export function createContainer(
   containerInfo: Container,
   tag: RootTag,
@@ -224,6 +225,7 @@ export function createContainer(
   return createFiberRoot(containerInfo, tag, hydrate, hydrationCallbacks);
 }
 
+// TODO: 渲染？
 export function updateContainer(
   element: ReactNodeList,
   container: OpaqueRoot,
@@ -300,6 +302,7 @@ export function updateContainer(
   }
 
   enqueueUpdate(current, update);
+  // TODO: 运行调度的入口
   scheduleWork(current, expirationTime);
 
   return expirationTime;

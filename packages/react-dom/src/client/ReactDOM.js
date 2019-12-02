@@ -209,11 +209,13 @@ function createRootImpl(
   return root;
 }
 
+// TODO：该类负责初始化 Fiber 实例
 function ReactBlockingRoot(
   container: DOMContainer,
   tag: RootTag,
   options: void | RootOptions,
 ) {
+  // TODO：ReactDOM 通过此方法创建 Fiber
   this._internalRoot = createRootImpl(container, tag, options);
 }
 
@@ -296,6 +298,7 @@ function legacyCreateRootFromDOMContainer(
   container: DOMContainer,
   forceHydrate: boolean,
 ): _ReactRoot {
+  // TODO: 首次挂载时为 flase
   const shouldHydrate =
     forceHydrate || shouldHydrateDueToLegacyHeuristic(container);
   // First clear any existing content.
@@ -334,6 +337,7 @@ function legacyCreateRootFromDOMContainer(
   }
 
   // Legacy roots are not batched.
+  // TODO: 生成 Fiber 的实例
   return new ReactBlockingRoot(
     container,
     LegacyRoot,
@@ -345,6 +349,7 @@ function legacyCreateRootFromDOMContainer(
   );
 }
 
+// legacy ：遗产，遗留， 方法的作用是？
 function legacyRenderSubtreeIntoContainer(
   parentComponent: ?React$Component<any, any>,
   children: ReactNodeList,
@@ -362,6 +367,7 @@ function legacyRenderSubtreeIntoContainer(
   let root: _ReactRoot = (container._reactRootContainer: any);
   let fiberRoot;
   if (!root) {
+    // TODO：初始挂载
     // Initial mount
     root = container._reactRootContainer = legacyCreateRootFromDOMContainer(
       container,
@@ -376,6 +382,7 @@ function legacyRenderSubtreeIntoContainer(
       };
     }
     // Initial mount should not be batched.
+    // TODO：为啥不是批量的？而且初始化时，上下文应该为空才是，unbatchedUpdates 存在变更上下文的操作
     unbatchedUpdates(() => {
       updateContainer(children, fiberRoot, parentComponent, callback);
     });
@@ -442,6 +449,7 @@ const ReactDOM: Object = {
     return findHostInstance(componentOrElement);
   },
 
+  // 与 render() 相同，但它用于在 ReactDOMServer 渲染的容器中对 HTML 的内容进行 hydrate 操作
   hydrate(element: React$Node, container: DOMContainer, callback: ?Function) {
     invariant(
       isValidContainer(container),
@@ -465,6 +473,7 @@ const ReactDOM: Object = {
     );
   },
 
+  // 在提供的 container 里渲染一个 React 元素，渲染入口，每个平台的 render 都不完全一致
   render(
     element: React$Element<any>,
     container: DOMContainer,

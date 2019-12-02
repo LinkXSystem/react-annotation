@@ -351,6 +351,7 @@ function FiberNode(
 //    is faster.
 // 5) It should be easy to port this to a C struct and keep a C implementation
 //    compatible.
+// TODO: 创建 Fiber 节点
 const createFiber = function(
   tag: WorkTag,
   pendingProps: mixed,
@@ -365,7 +366,7 @@ function shouldConstruct(Component: Function) {
   const prototype = Component.prototype;
   return !!(prototype && prototype.isReactComponent);
 }
-
+// TODO： 是否为一个简单的函数组件
 export function isSimpleFunctionComponent(type: any) {
   return (
     typeof type === 'function' &&
@@ -390,6 +391,7 @@ export function resolveLazyComponentTag(Component: Function): WorkTag {
 }
 
 // This is used to create an alternate fiber to do work on.
+// TODO：为当前的 fiber 创建备用的 fiber
 export function createWorkInProgress(
   current: Fiber,
   pendingProps: any,

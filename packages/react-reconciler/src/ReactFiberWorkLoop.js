@@ -216,6 +216,7 @@ export type Thenable = {
 };
 
 // Describes where we are in the React execution stack
+// TODO: 用于描述 react 运行栈所在的
 let executionContext: ExecutionContext = NoContext;
 // The root we're working on
 let workInProgressRoot: FiberRoot | null = null;
@@ -291,6 +292,7 @@ let currentEventTime: ExpirationTime = NoWork;
 export function requestCurrentTimeForUpdate() {
   if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
     // We're inside React, so it's fine to read the actual time.
+    // TODO: 注意区分环境
     return msToExpirationTime(now());
   }
   // We're not inside React, so we may be in the middle of a browser event.
@@ -307,6 +309,7 @@ export function getCurrentTime() {
   return msToExpirationTime(now());
 }
 
+// TODO: 运行截至时间
 export function computeExpirationForFiber(
   currentTime: ExpirationTime,
   fiber: Fiber,
@@ -317,6 +320,7 @@ export function computeExpirationForFiber(
     return Sync;
   }
 
+  // TODO: 获取任务的优先级
   const priorityLevel = getCurrentPriorityLevel();
   if ((mode & ConcurrentMode) === NoMode) {
     return priorityLevel === ImmediatePriority ? Sync : Batched;
@@ -441,6 +445,7 @@ export function scheduleUpdateOnFiber(
     }
   }
 }
+// TODO: 等效替换成 scheduleUpdateOnFiber
 export const scheduleWork = scheduleUpdateOnFiber;
 
 // This is split into a separate function so we can mark a fiber with pending
@@ -1183,11 +1188,14 @@ export function discreteUpdates<A, B, C, R>(
   }
 }
 
+//TODO: 初始化时将调用此方法
 export function unbatchedUpdates<A, R>(fn: (a: A) => R, a: A): R {
   const prevExecutionContext = executionContext;
   executionContext &= ~BatchedContext;
+  // TODO: 按位或运算
   executionContext |= LegacyUnbatchedContext;
   try {
+    // TODO: 注意这里执行了回调
     return fn(a);
   } finally {
     executionContext = prevExecutionContext;
