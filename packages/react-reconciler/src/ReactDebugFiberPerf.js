@@ -224,6 +224,7 @@ export function recordEffect(): void {
 }
 
 export function recordScheduleUpdate(): void {
+  //TODO: 源代码： enableUserTimingAPI = __DEV__，推断仅在开发模式启用
   if (enableUserTimingAPI) {
     if (isCommitting) {
       hasScheduledUpdateInCurrentCommit = true;

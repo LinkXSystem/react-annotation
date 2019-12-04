@@ -18,6 +18,7 @@ global.__EXPERIMENTAL__ =
     : true;
 
 if (typeof window !== 'undefined') {
+  // TODO: 为啥 requestIdleCallback 这样定义
   global.requestIdleCallback = function(callback) {
     return setTimeout(() => {
       callback({

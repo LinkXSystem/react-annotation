@@ -382,6 +382,7 @@ export function scheduleUpdateOnFiber(
   checkForNestedUpdates();
   warnAboutInvalidUpdatesOnClassComponentsInDEV(fiber);
 
+  // TODO: 推断运行点
   const root = markUpdateTimeFromFiberToRoot(fiber, expirationTime);
   if (root === null) {
     warnAboutUpdateOnUnmountedFiberInDEV(fiber);
@@ -408,8 +409,10 @@ export function scheduleUpdateOnFiber(
       // This is a legacy edge case. The initial mount of a ReactDOM.render-ed
       // root inside of batchedUpdates should be synchronous, but layout updates
       // should be deferred until the end of the batch.
+      // TODO: 注意上面这段话，首次挂载是同步的
       performSyncWorkOnRoot(root);
     } else {
+      // TODO: 确保运行时间一致
       ensureRootIsScheduled(root);
       schedulePendingInteractions(root, expirationTime);
       if (executionContext === NoContext) {
@@ -418,10 +421,16 @@ export function scheduleUpdateOnFiber(
         // scheduleCallbackForFiber to preserve the ability to schedule a callback
         // without immediately flushing it. We only do this for user-initiated
         // updates, to preserve historical behavior of legacy mode.
+        // TODO：谷歌翻译
+        // 立即清除同步工作，除非我们已经在工作或在批处理中。 
+        // 故意将其放置在scheduleUpdateOnFiber而不是scheduleCallbackForFiber内，
+        // 以保留在不立即刷新回调的情况下调度回调的功能。 
+        // 我们仅对用户启动的更新执行此操作，以保留旧版模式的历史行为。
         flushSyncCallbackQueue();
       }
     }
   } else {
+    // TODO: 确保运行时间一致
     ensureRootIsScheduled(root);
     schedulePendingInteractions(root, expirationTime);
   }
@@ -979,6 +988,7 @@ function finishConcurrentRender(
 
 // This is the entry point for synchronous tasks that don't go
 // through Scheduler
+//TODO: 同步任务的入口点
 function performSyncWorkOnRoot(root) {
   // Check if there's expired work on this root. Otherwise, render at Sync.
   const lastExpiredTime = root.lastExpiredTime;
@@ -2997,6 +3007,7 @@ function scheduleInteractions(root, expirationTime, interactions) {
     const subscriber = __subscriberRef.current;
     if (subscriber !== null) {
       const threadID = computeThreadID(root, expirationTime);
+      // TODO: 发射信号？ 源码地址：[scheduler|TracingSubscription]
       subscriber.onWorkScheduled(interactions, threadID);
     }
   }
@@ -3010,6 +3021,7 @@ function schedulePendingInteractions(root, expirationTime) {
     return;
   }
 
+  // TODO：是否通过此方法调度
   scheduleInteractions(root, expirationTime, __interactionsRef.current);
 }
 

@@ -376,6 +376,7 @@ function unstable_getFirstCallbackNode() {
   return peek(taskQueue);
 }
 
+// TODO：取消任务？
 function unstable_cancelCallback(task) {
   if (enableProfiling) {
     if (task.isQueued) {

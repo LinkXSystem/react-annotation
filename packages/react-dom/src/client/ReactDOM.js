@@ -396,6 +396,7 @@ function legacyRenderSubtreeIntoContainer(
       };
     }
     // Update
+    // TODO: 非首次初始化入口
     updateContainer(children, fiberRoot, parentComponent, callback);
   }
   return getPublicRootInstance(fiberRoot);

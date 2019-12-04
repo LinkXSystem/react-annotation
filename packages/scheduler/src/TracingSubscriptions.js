@@ -19,6 +19,11 @@ if (enableSchedulerTracing) {
 
 export function unstable_subscribe(subscriber: Subscriber): void {
   if (enableSchedulerTracing) {
+    // TODO:通过此获得订阅者
+    console.log("=======================================");
+    console.trace();
+    console.log("=======================================");
+
     subscribers.add(subscriber);
 
     if (subscribers.size === 1) {
