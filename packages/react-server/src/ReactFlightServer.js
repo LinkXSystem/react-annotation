@@ -7,7 +7,13 @@
  * @flow
  */
 
-import type {Destination} from './ReactServerHostConfig';
+import type {
+  Destination,
+  Chunk,
+  BundlerConfig,
+  ModuleMetaData,
+  ModuleReference,
+} from './ReactFlightServerConfig';
 
 import {
   scheduleWork,
@@ -16,67 +22,28 @@ import {
   completeWriting,
   flushBuffered,
   close,
-  convertStringToBuffer,
-} from './ReactServerHostConfig';
-import {renderHostChildrenToString} from './ReactServerFormatConfig';
-import {REACT_ELEMENT_TYPE} from 'shared/ReactSymbols';
+  processModelChunk,
+  processErrorChunk,
+  resolveModuleMetaData,
+} from './ReactFlightServerConfig';
 
-/*
+import {
+  REACT_BLOCK_TYPE,
+  REACT_SERVER_BLOCK_TYPE,
+  REACT_ELEMENT_TYPE,
+  REACT_FRAGMENT_TYPE,
+  REACT_LAZY_TYPE,
+} from 'shared/ReactSymbols';
 
-FLIGHT PROTOCOL GRAMMAR
+import invariant from 'shared/invariant';
 
-Response
-- JSONData RowSequence
-- JSONData
-
-RowSequence
-- Row RowSequence
-- Row
-
-Row
-- "J" RowID JSONData
-- "H" RowID HTMLData
-- "B" RowID BlobData
-- "U" RowID URLData
-- "E" RowID ErrorData
-
-RowID
-- HexDigits ":"
-
-HexDigits
-- HexDigit HexDigits
-- HexDigit
-
-HexDigit
-- 0-F
-
-URLData
-- (UTF8 encoded URL) "\n"
-
-ErrorData
-- (UTF8 encoded JSON: {message: "...", stack: "..."}) "\n"
-
-JSONData
-- (UTF8 encoded JSON) "\n"
-  - String values that begin with $ are escaped with a "$" prefix.
-  - References to other rows are encoding as JSONReference strings.
-
-JSONReference
-- "$" HexDigits
-
-HTMLData
-- ByteSize (UTF8 encoded HTML)
-
-BlobData
-- ByteSize (Binary Data)
-
-ByteSize
-- (unsigned 32-bit integer)
-*/
-
-// TODO: Implement HTMLData, BlobData and URLData.
-
-const stringify = JSON.stringify;
+type ReactJSONValue =
+  | string
+  | boolean
+  | number
+  | null
+  | $ReadOnlyArray<ReactJSONValue>
+  | ReactModelObject;
 
 export type ReactModel =
   | React$Element<any>
@@ -87,31 +54,22 @@ export type ReactModel =
   | Iterable<ReactModel>
   | ReactModelObject;
 
-type ReactJSONValue =
-  | string
-  | boolean
-  | number
-  | null
-  | Array<ReactModel>
-  | ReactModelObject;
-
-type ReactModelObject = {
-  +[key: string]: ReactModel,
-};
+type ReactModelObject = {+[key: string]: ReactModel};
 
 type Segment = {
   id: number,
-  model: ReactModel,
+  query: () => ReactModel,
   ping: () => void,
 };
 
-type OpaqueRequest = {
+export type Request = {
   destination: Destination,
+  bundlerConfig: BundlerConfig,
   nextChunkId: number,
   pendingChunks: number,
   pingedSegments: Array<Segment>,
-  completedJSONChunks: Array<Uint8Array>,
-  completedErrorChunks: Array<Uint8Array>,
+  completedJSONChunks: Array<Chunk>,
+  completedErrorChunks: Array<Chunk>,
   flowing: boolean,
   toJSON: (key: string, value: ReactModel) => ReactJSONValue,
 };
@@ -119,40 +77,47 @@ type OpaqueRequest = {
 export function createRequest(
   model: ReactModel,
   destination: Destination,
-): OpaqueRequest {
+  bundlerConfig: BundlerConfig,
+): Request {
   let pingedSegments = [];
   let request = {
     destination,
+    bundlerConfig,
     nextChunkId: 0,
     pendingChunks: 0,
     pingedSegments: pingedSegments,
     completedJSONChunks: [],
     completedErrorChunks: [],
     flowing: false,
-    toJSON: (key: string, value: ReactModel) =>
-      resolveModelToJSON(request, value),
+    toJSON: function(key: string, value: ReactModel): ReactJSONValue {
+      return resolveModelToJSON(request, this, key, value);
+    },
   };
   request.pendingChunks++;
-  let rootSegment = createSegment(request, model);
+  let rootSegment = createSegment(request, () => model);
   pingedSegments.push(rootSegment);
   return request;
 }
 
-function attemptResolveModelComponent(element: React$Element<any>): ReactModel {
+function attemptResolveElement(element: React$Element<any>): ReactModel {
   let type = element.type;
   let props = element.props;
   if (typeof type === 'function') {
-    // This is a nested view model.
+    // This is a server-side component.
     return type(props);
   } else if (typeof type === 'string') {
     // This is a host element. E.g. HTML.
-    return renderHostChildrenToString(element);
+    return [REACT_ELEMENT_TYPE, type, element.key, element.props];
+  } else if (type[0] === REACT_SERVER_BLOCK_TYPE) {
+    return [REACT_ELEMENT_TYPE, type, element.key, element.props];
+  } else if (type === REACT_FRAGMENT_TYPE) {
+    return element.props.children;
   } else {
-    throw new Error('Unsupported type.');
+    invariant(false, 'Unsupported type.');
   }
 }
 
-function pingSegment(request: OpaqueRequest, segment: Segment): void {
+function pingSegment(request: Request, segment: Segment): void {
   let pingedSegments = request.pingedSegments;
   pingedSegments.push(segment);
   if (pingedSegments.length === 1) {
@@ -160,11 +125,11 @@ function pingSegment(request: OpaqueRequest, segment: Segment): void {
   }
 }
 
-function createSegment(request: OpaqueRequest, model: ReactModel): Segment {
+function createSegment(request: Request, query: () => ReactModel): Segment {
   let id = request.nextChunkId++;
   let segment = {
     id,
-    model,
+    query,
     ping: () => pingSegment(request, segment),
   };
   return segment;
@@ -174,61 +139,113 @@ function serializeIDRef(id: number): string {
   return '$' + id.toString(16);
 }
 
-function serializeRowHeader(tag: string, id: number) {
-  return tag + id.toString(16) + ':';
-}
-
 function escapeStringValue(value: string): string {
-  if (value[0] === '$') {
-    // We need to escape $ prefixed strings since we use that to encode
-    // references to IDs.
+  if (value[0] === '$' || value[0] === '@') {
+    // We need to escape $ or @ prefixed strings since we use those to encode
+    // references to IDs and as special symbol values.
     return '$' + value;
   } else {
     return value;
   }
 }
 
-function resolveModelToJSON(
-  request: OpaqueRequest,
+export function resolveModelToJSON(
+  request: Request,
+  parent: {+[key: string | number]: ReactModel} | $ReadOnlyArray<ReactModel>,
+  key: string,
   value: ReactModel,
 ): ReactJSONValue {
+  // Special Symbols
+  switch (value) {
+    case REACT_ELEMENT_TYPE:
+      return '$';
+    case REACT_SERVER_BLOCK_TYPE:
+      return '@';
+    case REACT_LAZY_TYPE:
+    case REACT_BLOCK_TYPE:
+      invariant(
+        false,
+        'React Blocks (and Lazy Components) are expected to be replaced by a ' +
+          'compiler on the server. Try configuring your compiler set up and avoid ' +
+          'using React.lazy inside of Blocks.',
+      );
+  }
+
+  if (parent[0] === REACT_SERVER_BLOCK_TYPE) {
+    // We're currently encoding part of a Block. Look up which key.
+    switch (key) {
+      case '1': {
+        // Module reference
+        let moduleReference: ModuleReference<any> = (value: any);
+        try {
+          let moduleMetaData: ModuleMetaData = resolveModuleMetaData(
+            request.bundlerConfig,
+            moduleReference,
+          );
+          return (moduleMetaData: ReactJSONValue);
+        } catch (x) {
+          request.pendingChunks++;
+          let errorId = request.nextChunkId++;
+          emitErrorChunk(request, errorId, x);
+          return serializeIDRef(errorId);
+        }
+      }
+      case '2': {
+        // Load function
+        let load: () => ReactModel = (value: any);
+        try {
+          // Attempt to resolve the data.
+          return load();
+        } catch (x) {
+          if (
+            typeof x === 'object' &&
+            x !== null &&
+            typeof x.then === 'function'
+          ) {
+            // Something suspended, we'll need to create a new segment and resolve it later.
+            request.pendingChunks++;
+            let newSegment = createSegment(request, load);
+            let ping = newSegment.ping;
+            x.then(ping, ping);
+            return serializeIDRef(newSegment.id);
+          } else {
+            // This load failed, encode the error as a separate row and reference that.
+            request.pendingChunks++;
+            let errorId = request.nextChunkId++;
+            emitErrorChunk(request, errorId, x);
+            return serializeIDRef(errorId);
+          }
+        }
+      }
+      default: {
+        invariant(
+          false,
+          'A server block should never encode any other slots. This is a bug in React.',
+        );
+      }
+    }
+  }
+
   if (typeof value === 'string') {
     return escapeStringValue(value);
   }
 
+  // Resolve server components.
   while (
     typeof value === 'object' &&
     value !== null &&
     value.$$typeof === REACT_ELEMENT_TYPE
   ) {
+    // TODO: Concatenate keys of parents onto children.
+    // TODO: Allow elements to suspend independently and serialize as references to future elements.
     let element: React$Element<any> = (value: any);
-    try {
-      value = attemptResolveModelComponent(element);
-    } catch (x) {
-      if (typeof x === 'object' && x !== null && typeof x.then === 'function') {
-        // Something suspended, we'll need to create a new segment and resolve it later.
-        request.pendingChunks++;
-        let newSegment = createSegment(request, element);
-        let ping = newSegment.ping;
-        x.then(ping, ping);
-        return serializeIDRef(newSegment.id);
-      } else {
-        request.pendingChunks++;
-        let errorId = request.nextChunkId++;
-        emitErrorChunk(request, errorId, x);
-        return serializeIDRef(errorId);
-      }
-    }
+    value = attemptResolveElement(element);
   }
 
   return value;
 }
 
-function emitErrorChunk(
-  request: OpaqueRequest,
-  id: number,
-  error: mixed,
-): void {
+function emitErrorChunk(request: Request, id: number, error: mixed): void {
   // TODO: We should not leak error messages to the client in prod.
   // Give this an error code instead and log on the server.
   // We can serialize the error in DEV as a convenience.
@@ -244,34 +261,17 @@ function emitErrorChunk(
   } catch (x) {
     message = 'An error occurred but serializing the error message failed.';
   }
-  let errorInfo = {message, stack};
-  let row = serializeRowHeader('E', id) + stringify(errorInfo) + '\n';
-  request.completedErrorChunks.push(convertStringToBuffer(row));
+
+  let processedChunk = processErrorChunk(request, id, message, stack);
+  request.completedErrorChunks.push(processedChunk);
 }
 
-function retrySegment(request: OpaqueRequest, segment: Segment): void {
-  let value = segment.model;
+function retrySegment(request: Request, segment: Segment): void {
+  let query = segment.query;
   try {
-    while (
-      typeof value === 'object' &&
-      value !== null &&
-      value.$$typeof === REACT_ELEMENT_TYPE
-    ) {
-      // If this is a nested model, there's no need to create another chunk,
-      // we can reuse the existing one and try again.
-      let element: React$Element<any> = (value: any);
-      segment.model = element;
-      value = attemptResolveModelComponent(element);
-    }
-    let json = stringify(value, request.toJSON);
-    let row;
-    let id = segment.id;
-    if (id === 0) {
-      row = json + '\n';
-    } else {
-      row = serializeRowHeader('J', id) + json + '\n';
-    }
-    request.completedJSONChunks.push(convertStringToBuffer(row));
+    let value = query();
+    let processedChunk = processModelChunk(request, segment.id, value);
+    request.completedJSONChunks.push(processedChunk);
   } catch (x) {
     if (typeof x === 'object' && x !== null && typeof x.then === 'function') {
       // Something suspended again, let's pick it back up later.
@@ -285,7 +285,7 @@ function retrySegment(request: OpaqueRequest, segment: Segment): void {
   }
 }
 
-function performWork(request: OpaqueRequest): void {
+function performWork(request: Request): void {
   let pingedSegments = request.pingedSegments;
   request.pingedSegments = [];
   for (let i = 0; i < pingedSegments.length; i++) {
@@ -298,7 +298,7 @@ function performWork(request: OpaqueRequest): void {
 }
 
 let reentrant = false;
-function flushCompletedChunks(request: OpaqueRequest): void {
+function flushCompletedChunks(request: Request): void {
   if (reentrant) {
     return;
   }
@@ -341,12 +341,12 @@ function flushCompletedChunks(request: OpaqueRequest): void {
   }
 }
 
-export function startWork(request: OpaqueRequest): void {
+export function startWork(request: Request): void {
   request.flowing = true;
   scheduleWork(() => performWork(request));
 }
 
-export function startFlowing(request: OpaqueRequest): void {
+export function startFlowing(request: Request): void {
   request.flowing = true;
   flushCompletedChunks(request);
 }

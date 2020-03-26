@@ -23,8 +23,8 @@ import {
   HostText,
   HostRoot,
   SuspenseComponent,
-} from 'shared/ReactWorkTags';
-import {Deletion, Placement, Hydrating} from 'shared/ReactSideEffectTags';
+} from './ReactWorkTags';
+import {Deletion, Placement, Hydrating} from './ReactSideEffectTags';
 import invariant from 'shared/invariant';
 
 import {
@@ -55,7 +55,6 @@ import {
   didNotFindHydratableSuspenseInstance,
 } from './ReactFiberHostConfig';
 import {enableSuspenseServerRenderer} from 'shared/ReactFeatureFlags';
-import warning from 'shared/warning';
 import {Never} from './ReactFiberExpirationTime';
 
 // The deepest Fiber on the stack involved in a hydration context.
@@ -66,10 +65,11 @@ let isHydrating: boolean = false;
 
 function warnIfHydrating() {
   if (__DEV__) {
-    warning(
-      !isHydrating,
-      'We should not be hydrating here. This is a bug in React. Please file a bug.',
-    );
+    if (isHydrating) {
+      console.error(
+        'We should not be hydrating here. This is a bug in React. Please file a bug.',
+      );
+    }
   }
 }
 
@@ -484,10 +484,6 @@ function resetHydrationState(): void {
   isHydrating = false;
 }
 
-function getIsHydrating(): boolean {
-  return isHydrating;
-}
-
 export {
   warnIfHydrating,
   enterHydrationState,
@@ -498,5 +494,4 @@ export {
   prepareToHydrateHostTextInstance,
   prepareToHydrateHostSuspenseInstance,
   popHydrationState,
-  getIsHydrating,
 };

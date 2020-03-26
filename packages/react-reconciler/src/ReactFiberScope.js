@@ -12,6 +12,8 @@ import type {
   ReactScope,
   ReactScopeInstance,
   ReactScopeMethods,
+  ReactContext,
+  ReactScopeQuery,
 } from 'shared/ReactTypes';
 
 import {getPublicInstance, getInstanceFromNode} from './ReactFiberHostConfig';
@@ -20,11 +22,17 @@ import {
   HostComponent,
   SuspenseComponent,
   ScopeComponent,
-} from 'shared/ReactWorkTags';
+  ContextProvider,
+} from './ReactWorkTags';
 import {enableScopeAPI} from 'shared/ReactFeatureFlags';
 
 function isFiberSuspenseAndTimedOut(fiber: Fiber): boolean {
-  return fiber.tag === SuspenseComponent && fiber.memoizedState !== null;
+  const memoizedState = fiber.memoizedState;
+  return (
+    fiber.tag === SuspenseComponent &&
+    memoizedState !== null &&
+    memoizedState.dehydrated === null
+  );
 }
 
 function getSuspenseFallbackChild(fiber: Fiber): Fiber | null {
@@ -35,17 +43,16 @@ const emptyObject = {};
 
 function collectScopedNodes(
   node: Fiber,
-  fn: (type: string | Object, props: Object) => boolean,
+  fn: ReactScopeQuery,
   scopedNodes: Array<any>,
-  searchNode: null | Set<Object>,
 ): void {
   if (enableScopeAPI) {
     if (node.tag === HostComponent) {
-      const instance = getPublicInstance(node.stateNode);
-      const {type, memoizedProps} = node;
+      const {type, memoizedProps, stateNode} = node;
+      const instance = getPublicInstance(stateNode);
       if (
-        (searchNode !== null && searchNode.has(instance)) ||
-        fn(type, memoizedProps || emptyObject) === true
+        instance !== null &&
+        fn(type, memoizedProps || emptyObject, instance) === true
       ) {
         scopedNodes.push(instance);
       }
@@ -56,20 +63,21 @@ function collectScopedNodes(
       child = getSuspenseFallbackChild(node);
     }
     if (child !== null) {
-      collectScopedNodesFromChildren(child, fn, scopedNodes, searchNode);
+      collectScopedNodesFromChildren(child, fn, scopedNodes);
     }
   }
 }
 
 function collectFirstScopedNode(
   node: Fiber,
-  fn: (type: string | Object, props: Object) => boolean,
+  fn: ReactScopeQuery,
 ): null | Object {
   if (enableScopeAPI) {
     if (node.tag === HostComponent) {
-      const {type, memoizedProps} = node;
-      if (fn(type, memoizedProps) === true) {
-        return getPublicInstance(node.stateNode);
+      const {type, memoizedProps, stateNode} = node;
+      const instance = getPublicInstance(stateNode);
+      if (instance !== null && fn(type, memoizedProps, instance) === true) {
+        return instance;
       }
     }
     let child = node.child;
@@ -86,20 +94,19 @@ function collectFirstScopedNode(
 
 function collectScopedNodesFromChildren(
   startingChild: Fiber,
-  fn: (type: string | Object, props: Object) => boolean,
+  fn: ReactScopeQuery,
   scopedNodes: Array<any>,
-  searchNode: null | Set<Object>,
 ): void {
   let child = startingChild;
   while (child !== null) {
-    collectScopedNodes(child, fn, scopedNodes, searchNode);
+    collectScopedNodes(child, fn, scopedNodes);
     child = child.sibling;
   }
 }
 
 function collectFirstScopedNodeFromChildren(
   startingChild: Fiber,
-  fn: (type: string | Object, props: Object) => boolean,
+  fn: ReactScopeQuery,
 ): Object | null {
   let child = startingChild;
   while (child !== null) {
@@ -112,13 +119,14 @@ function collectFirstScopedNodeFromChildren(
   return null;
 }
 
-function collectNearestScopeMethods(
+function collectNearestContextValues<T>(
   node: Fiber,
-  scope: ReactScope,
-  childrenScopes: Array<ReactScopeMethods>,
+  context: ReactContext<T>,
+  childContextValues: Array<T>,
 ): void {
-  if (isValidScopeNode(node, scope)) {
-    childrenScopes.push(node.stateNode.methods);
+  if (node.tag === ContextProvider && node.type._context === context) {
+    const contextValue = node.memoizedProps.value;
+    childContextValues.push(contextValue);
   } else {
     let child = node.child;
 
@@ -126,29 +134,21 @@ function collectNearestScopeMethods(
       child = getSuspenseFallbackChild(node);
     }
     if (child !== null) {
-      collectNearestChildScopeMethods(child, scope, childrenScopes);
+      collectNearestChildContextValues(child, context, childContextValues);
     }
   }
 }
 
-function collectNearestChildScopeMethods(
+function collectNearestChildContextValues<T>(
   startingChild: Fiber | null,
-  scope: ReactScope,
-  childrenScopes: Array<ReactScopeMethods>,
+  context: ReactContext<T>,
+  childContextValues: Array<T>,
 ): void {
   let child = startingChild;
   while (child !== null) {
-    collectNearestScopeMethods(child, scope, childrenScopes);
+    collectNearestContextValues(child, context, childContextValues);
     child = child.sibling;
   }
-}
-
-function isValidScopeNode(node, scope) {
-  return (
-    node.tag === ScopeComponent &&
-    node.type === scope &&
-    node.stateNode !== null
-  );
 }
 
 export function createScopeMethods(
@@ -156,62 +156,16 @@ export function createScopeMethods(
   instance: ReactScopeInstance,
 ): ReactScopeMethods {
   return {
-    getChildren(): null | Array<ReactScopeMethods> {
-      const currentFiber = ((instance.fiber: any): Fiber);
-      const child = currentFiber.child;
-      const childrenScopes = [];
-      if (child !== null) {
-        collectNearestChildScopeMethods(child, scope, childrenScopes);
-      }
-      return childrenScopes.length === 0 ? null : childrenScopes;
-    },
-    getChildrenFromRoot(): null | Array<ReactScopeMethods> {
-      const currentFiber = ((instance.fiber: any): Fiber);
-      let node = currentFiber;
-      while (node !== null) {
-        const parent = node.return;
-        if (parent === null) {
-          break;
-        }
-        node = parent;
-        if (node.tag === ScopeComponent && node.type === scope) {
-          break;
-        }
-      }
-      const childrenScopes = [];
-      collectNearestChildScopeMethods(node.child, scope, childrenScopes);
-      return childrenScopes.length === 0 ? null : childrenScopes;
-    },
-    getParent(): null | ReactScopeMethods {
-      let node = ((instance.fiber: any): Fiber).return;
-      while (node !== null) {
-        if (node.tag === ScopeComponent && node.type === scope) {
-          return node.stateNode.methods;
-        }
-        node = node.return;
-      }
-      return null;
-    },
-    getProps(): Object {
-      const currentFiber = ((instance.fiber: any): Fiber);
-      return currentFiber.memoizedProps;
-    },
-    queryAllNodes(
-      fn: (type: string | Object, props: Object) => boolean,
-      searchNodes?: Array<Object>,
-    ): null | Array<Object> {
+    DO_NOT_USE_queryAllNodes(fn: ReactScopeQuery): null | Array<Object> {
       const currentFiber = ((instance.fiber: any): Fiber);
       const child = currentFiber.child;
       const scopedNodes = [];
-      const searchNodeSet = searchNodes ? new Set(searchNodes) : null;
       if (child !== null) {
-        collectScopedNodesFromChildren(child, fn, scopedNodes, searchNodeSet);
+        collectScopedNodesFromChildren(child, fn, scopedNodes);
       }
       return scopedNodes.length === 0 ? null : scopedNodes;
     },
-    queryFirstNode(
-      fn: (type: string | Object, props: Object) => boolean,
-    ): null | Object {
+    DO_NOT_USE_queryFirstNode(fn: ReactScopeQuery): null | Object {
       const currentFiber = ((instance.fiber: any): Fiber);
       const child = currentFiber.child;
       if (child !== null) {
@@ -232,6 +186,15 @@ export function createScopeMethods(
         fiber = fiber.return;
       }
       return false;
+    },
+    getChildContextValues<T>(context: ReactContext<T>): Array<T> {
+      const currentFiber = ((instance.fiber: any): Fiber);
+      const child = currentFiber.child;
+      const childContextValues = [];
+      if (child !== null) {
+        collectNearestChildContextValues(child, context, childContextValues);
+      }
+      return childContextValues;
     },
   };
 }

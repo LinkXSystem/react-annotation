@@ -7,16 +7,6 @@
  * @flow
  */
 
-import type {
-  ReactNativeBaseComponentViewConfig,
-  ReactNativeResponderEvent,
-  ReactNativeResponderContext,
-} from './ReactNativeTypes';
-import type {
-  ReactEventResponder,
-  ReactEventResponderInstance,
-} from 'shared/ReactTypes';
-
 import invariant from 'shared/invariant';
 
 // Modules provided by RN:
@@ -36,24 +26,14 @@ import ReactNativeFiberHostComponent from './ReactNativeFiberHostComponent';
 
 const {get: getViewConfigForType} = ReactNativeViewConfigRegistry;
 
-type ReactNativeEventResponderInstance = ReactEventResponderInstance<
-  ReactNativeResponderEvent,
-  ReactNativeResponderContext,
->;
-
-type ReactNativeEventResponder = ReactEventResponder<
-  ReactNativeResponderEvent,
-  ReactNativeResponderContext,
->;
+export type ReactListenerEvent = Object;
+export type ReactListenerMap = Object;
+export type ReactListener = Object;
 
 export type Type = string;
 export type Props = Object;
 export type Container = number;
-export type Instance = {
-  _children: Array<Instance | number>,
-  _nativeTag: number,
-  viewConfig: ReactNativeBaseComponentViewConfig<>,
-};
+export type Instance = ReactNativeFiberHostComponent;
 export type TextInstance = number;
 export type HydratableInstance = Instance | TextInstance;
 export type PublicInstance = Instance;
@@ -95,8 +75,8 @@ function recursivelyUncacheFiberNode(node: Instance | TextInstance) {
   }
 }
 
-export * from 'shared/HostConfigWithNoPersistence';
-export * from 'shared/HostConfigWithNoHydration';
+export * from 'react-reconciler/src/ReactFiberHostConfigWithNoPersistence';
+export * from 'react-reconciler/src/ReactFiberHostConfigWithNoHydration';
 
 export function appendInitialChild(
   parentInstance: Instance,
@@ -181,11 +161,10 @@ export function finalizeInitialChildren(
 
   // Map from child objects to native tags.
   // Either way we need to pass a copy of the Array to prevent it from being frozen.
-  const nativeTags = parentInstance._children.map(
-    child =>
-      typeof child === 'number'
-        ? child // Leaf node (eg text)
-        : child._nativeTag,
+  const nativeTags = parentInstance._children.map(child =>
+    typeof child === 'number'
+      ? child // Leaf node (eg text)
+      : child._nativeTag,
   );
 
   UIManager.setChildren(
@@ -495,9 +474,9 @@ export function unhideTextInstance(
   throw new Error('Not yet implemented.');
 }
 
-export function mountResponderInstance(
-  responder: ReactNativeEventResponder,
-  responderInstance: ReactNativeEventResponderInstance,
+export function DEPRECATED_mountResponderInstance(
+  responder: any,
+  responderInstance: any,
   props: Object,
   state: Object,
   instance: Instance,
@@ -505,32 +484,52 @@ export function mountResponderInstance(
   throw new Error('Not yet implemented.');
 }
 
-export function unmountResponderInstance(
-  responderInstance: ReactNativeEventResponderInstance,
+export function DEPRECATED_unmountResponderInstance(
+  responderInstance: any,
 ): void {
   throw new Error('Not yet implemented.');
 }
 
-export function getFundamentalComponentInstance(fundamentalInstance) {
+export function getFundamentalComponentInstance(fundamentalInstance: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function mountFundamentalComponent(fundamentalInstance) {
+export function mountFundamentalComponent(fundamentalInstance: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function shouldUpdateFundamentalComponent(fundamentalInstance) {
+export function shouldUpdateFundamentalComponent(fundamentalInstance: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function updateFundamentalComponent(fundamentalInstance) {
+export function updateFundamentalComponent(fundamentalInstance: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function unmountFundamentalComponent(fundamentalInstance) {
+export function unmountFundamentalComponent(fundamentalInstance: any) {
   throw new Error('Not yet implemented.');
 }
 
-export function getInstanceFromNode(node) {
+export function getInstanceFromNode(node: any) {
+  throw new Error('Not yet implemented.');
+}
+
+export function beforeRemoveInstance(instance: any) {
+  // noop
+}
+
+export function registerEvent(event: any, rootContainerInstance: Container) {
+  throw new Error('Not yet implemented.');
+}
+
+export function mountEventListener(listener: any) {
+  throw new Error('Not yet implemented.');
+}
+
+export function unmountEventListener(listener: any) {
+  throw new Error('Not yet implemented.');
+}
+
+export function validateEventListenerTarget(target: any, listener: any) {
   throw new Error('Not yet implemented.');
 }

@@ -13,7 +13,7 @@ import {DiscreteEvent, UserBlockingEvent} from 'shared/ReactTypes';
 import type {
   ReactDOMResponderContext,
   ReactDOMResponderEvent,
-} from 'shared/ReactDOMTypes';
+} from 'react-dom/src/shared/ReactDOMTypes';
 
 export const hasPointerEvents =
   typeof window !== 'undefined' && window.PointerEvent !== undefined;
@@ -79,5 +79,9 @@ export function hasModifierKey(event: ReactDOMResponderEvent): boolean {
 // where only the "virtual" click lacks a pointerType field.
 export function isVirtualClick(event: ReactDOMResponderEvent): boolean {
   const nativeEvent: any = event.nativeEvent;
+  // JAWS/NVDA with Firefox.
+  if (nativeEvent.mozInputSource === 0 && nativeEvent.isTrusted) {
+    return true;
+  }
   return nativeEvent.detail === 0 && !nativeEvent.pointerType;
 }

@@ -7,10 +7,9 @@
  * @flow
  */
 
-import type {Thenable} from 'react-reconciler/src/ReactFiberWorkLoop';
+import type {Thenable} from 'shared/ReactTypes';
 
-import warningWithoutStack from 'shared/warningWithoutStack';
-import ReactDOM from 'react-dom';
+import * as ReactDOM from 'react-dom';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import enqueueTask from 'shared/enqueueTask';
 import * as Scheduler from 'scheduler';
@@ -24,8 +23,6 @@ const [
   getFiberCurrentPropsFromNode,
   injectEventPluginsByName,
   eventNameDispatchConfigs,
-  accumulateTwoPhaseDispatches,
-  accumulateDirectDispatches,
   enqueueStateRestore,
   restoreStateIfNeeded,
   dispatchEvent,
@@ -76,10 +73,11 @@ function flushWorkAndMicroTasks(onDone: (err: ?Error) => void) {
 let actingUpdatesScopeDepth = 0;
 let didWarnAboutUsingActInProd = false;
 
-function act(callback: () => Thenable) {
+function act(callback: () => Thenable<mixed>): Thenable<void> {
   if (!__DEV__) {
     if (didWarnAboutUsingActInProd === false) {
       didWarnAboutUsingActInProd = true;
+      // eslint-disable-next-line react-internal/no-production-logging
       console.error(
         'act(...) is not supported in production builds of React, and might not behave as expected.',
       );
@@ -102,8 +100,7 @@ function act(callback: () => Thenable) {
     if (__DEV__) {
       if (actingUpdatesScopeDepth > previousActingUpdatesScopeDepth) {
         // if it's _less than_ previousActingUpdatesScopeDepth, then we can assume the 'other' one has warned
-        warningWithoutStack(
-          null,
+        console.error(
           'You seem to have overlapping act() calls, this is not supported. ' +
             'Be sure to await previous act() calls before making a new one. ',
         );
@@ -135,8 +132,7 @@ function act(callback: () => Thenable) {
           .then(() => {})
           .then(() => {
             if (called === false) {
-              warningWithoutStack(
-                null,
+              console.error(
                 'You called act(async () => ...) without await. ' +
                   'This could lead to unexpected testing behaviour, interleaving multiple act ' +
                   'calls and mixing their scopes. You should - await act(async () => ...);',
@@ -150,7 +146,7 @@ function act(callback: () => Thenable) {
     // effects and  microtasks in a loop until flushPassiveEffects() === false,
     // and cleans up
     return {
-      then(resolve: () => void, reject: (?Error) => void) {
+      then(resolve, reject) {
         called = true;
         result.then(
           () => {
@@ -183,12 +179,13 @@ function act(callback: () => Thenable) {
     };
   } else {
     if (__DEV__) {
-      warningWithoutStack(
-        result === undefined,
-        'The callback passed to act(...) function ' +
-          'must return undefined, or a Promise. You returned %s',
-        result,
-      );
+      if (result !== undefined) {
+        console.error(
+          'The callback passed to act(...) function ' +
+            'must return undefined, or a Promise. You returned %s',
+          result,
+        );
+      }
     }
 
     // flush effects until none remain, and cleanup
@@ -209,10 +206,9 @@ function act(callback: () => Thenable) {
 
     // in the sync case, the returned thenable only warns *if* await-ed
     return {
-      then(resolve: () => void) {
+      then(resolve) {
         if (__DEV__) {
-          warningWithoutStack(
-            false,
+          console.error(
             'Do not await the result of calling act(...) with sync logic, it is not a Promise.',
           );
         }

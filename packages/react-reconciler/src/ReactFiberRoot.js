@@ -9,9 +9,9 @@
 
 import type {Fiber} from './ReactFiber';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
-import type {RootTag} from 'shared/ReactRootTags';
+import type {RootTag} from 'react-reconciler/src/ReactRootTags';
 import type {TimeoutHandle, NoTimeout} from './ReactFiberHostConfig';
-import type {Thenable} from './ReactFiberWorkLoop';
+import type {Wakeable} from 'shared/ReactTypes';
 import type {Interaction} from 'scheduler/src/Tracing';
 import type {SuspenseHydrationCallbacks} from './ReactFiberSuspenseComponent';
 import type {ReactPriorityLevel} from './SchedulerWithReactIntegration';
@@ -25,6 +25,8 @@ import {
 } from 'shared/ReactFeatureFlags';
 import {unstable_getThreadID} from 'scheduler/tracing';
 import {NoPriority} from './SchedulerWithReactIntegration';
+import {initializeUpdateQueue} from './ReactUpdateQueue';
+import {clearPendingUpdates as clearPendingMutableSourceUpdates} from './ReactMutableSource';
 
 export type PendingInteractionMap = Map<ExpirationTime, Set<Interaction>>;
 
@@ -40,8 +42,8 @@ type BaseFiberRootProperties = {|
   current: Fiber,
 
   pingCache:
-    | WeakMap<Thenable, Set<ExpirationTime>>
-    | Map<Thenable, Set<ExpirationTime>>
+    | WeakMap<Wakeable, Set<ExpirationTime>>
+    | Map<Wakeable, Set<ExpirationTime>>
     | null,
 
   finishedExpirationTime: ExpirationTime,
@@ -73,6 +75,9 @@ type BaseFiberRootProperties = {|
   // render again
   lastPingedTime: ExpirationTime,
   lastExpiredTime: ExpirationTime,
+  // Used by useMutableSource hook to avoid tearing within this root
+  // when external, mutable sources are read from during render.
+  mutableSourcePendingUpdateTime: ExpirationTime,
 |};
 
 // The following attributes are only used by interaction tracing builds.
@@ -99,6 +104,7 @@ export type FiberRoot = {
   ...BaseFiberRootProperties,
   ...ProfilingOnlyFiberRootProperties,
   ...SuspenseCallbackOnlyFiberRootProperties,
+  ...
 };
 
 function FiberRootNode(containerInfo, tag, hydrate) {
@@ -121,6 +127,7 @@ function FiberRootNode(containerInfo, tag, hydrate) {
   this.nextKnownPendingLevel = NoWork;
   this.lastPingedTime = NoWork;
   this.lastExpiredTime = NoWork;
+  this.mutableSourcePendingUpdateTime = NoWork;
 
   if (enableSchedulerTracing) {
     this.interactionThreadID = unstable_getThreadID();
@@ -149,6 +156,8 @@ export function createFiberRoot(
   root.current = uninitializedFiber;
   uninitializedFiber.stateNode = root;
 
+  initializeUpdateQueue(uninitializedFiber);
+
   return root;
 }
 
@@ -160,8 +169,8 @@ export function isRootSuspendedAtTime(
   const lastSuspendedTime = root.lastSuspendedTime;
   return (
     firstSuspendedTime !== NoWork &&
-    (firstSuspendedTime >= expirationTime &&
-      lastSuspendedTime <= expirationTime)
+    firstSuspendedTime >= expirationTime &&
+    lastSuspendedTime <= expirationTime
   );
 }
 
@@ -245,6 +254,9 @@ export function markRootFinishedAtTime(
     // Clear the expired time
     root.lastExpiredTime = NoWork;
   }
+
+  // Clear any pending updates that were just processed.
+  clearPendingMutableSourceUpdates(root, finishedExpirationTime);
 }
 
 export function markRootExpiredAtTime(

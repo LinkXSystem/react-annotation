@@ -7,6 +7,7 @@
  * @flow
  */
 
+import type {Wakeable} from 'shared/ReactTypes';
 import type {Fiber} from './ReactFiber';
 import type {FiberRoot} from './ReactFiberRoot';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
@@ -14,13 +15,17 @@ import type {ReactPriorityLevel} from './SchedulerWithReactIntegration';
 import type {Interaction} from 'scheduler/src/Tracing';
 import type {SuspenseConfig} from './ReactFiberSuspenseConfig';
 import type {SuspenseState} from './ReactFiberSuspenseComponent';
+import type {Effect as HookEffect} from './ReactFiberHooks';
 
 import {
   warnAboutDeprecatedLifecycles,
+  deferPassiveEffectCleanupDuringUnmount,
+  runAllPassiveEffectDestroysBeforeCreates,
   enableUserTimingAPI,
   enableSuspenseServerRenderer,
   replayFailedUnitOfWorkWithInvokeGuardedCallback,
   enableProfilerTimer,
+  enableProfilerCommitHooks,
   enableSchedulerTracing,
   warnAboutUnmockedScheduler,
   flushSuspenseFallbacksInTests,
@@ -28,7 +33,6 @@ import {
 } from 'shared/ReactFeatureFlags';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import invariant from 'shared/invariant';
-import warning from 'shared/warning';
 
 import {
   scheduleCallback,
@@ -86,7 +90,9 @@ import {
   ForwardRef,
   MemoComponent,
   SimpleMemoComponent,
-} from 'shared/ReactWorkTags';
+  Block,
+} from './ReactWorkTags';
+import {LegacyRoot} from 'react-reconciler/src/ReactRootTags';
 import {
   NoEffect,
   PerformedWork,
@@ -103,7 +109,7 @@ import {
   HostEffectMask,
   Hydrating,
   HydratingAndUpdate,
-} from 'shared/ReactSideEffectTags';
+} from './ReactSideEffectTags';
 import {
   NoWork,
   Sync,
@@ -135,25 +141,27 @@ import {
   commitDeletion,
   commitDetachRef,
   commitAttachRef,
+  commitPassiveEffectDurations,
   commitResetTextContent,
 } from './ReactFiberCommitWork';
 import {enqueueUpdate} from './ReactUpdateQueue';
 import {resetContextDependencies} from './ReactFiberNewContext';
-import {resetHooks, ContextOnlyDispatcher} from './ReactFiberHooks';
+import {resetHooksAfterThrow, ContextOnlyDispatcher} from './ReactFiberHooks';
 import {createCapturedValue} from './ReactCapturedValue';
 
 import {
   recordCommitTime,
+  recordPassiveEffectDuration,
+  startPassiveEffectTimer,
   startProfilerTimer,
   stopProfilerTimerIfRunningAndRecordDelta,
 } from './ReactProfilerTimer';
 
 // DEV stuff
-import warningWithoutStack from 'shared/warningWithoutStack';
 import getComponentName from 'shared/getComponentName';
 import ReactStrictModeWarnings from './ReactStrictModeWarnings';
 import {
-  phase as ReactCurrentDebugFiberPhaseInDEV,
+  isRendering as ReactCurrentDebugFiberIsRenderingInDEV,
   resetCurrentFiber as resetCurrentDebugFiberInDEV,
   setCurrentFiber as setCurrentDebugFiberInDEV,
   getStackByFiberInDevAndProd,
@@ -208,13 +216,6 @@ const RootSuspended = 3;
 const RootSuspendedWithDelay = 4;
 const RootCompleted = 5;
 
-export type Thenable = {
-  then(resolve: () => mixed, reject?: () => mixed): Thenable | void,
-
-  // Special flag to opt out of tracing interactions across a Suspense boundary.
-  __reactDoNotTraceInteractions?: boolean,
-};
-
 // Describes where we are in the React execution stack
 let executionContext: ExecutionContext = NoContext;
 // The root we're working on
@@ -256,6 +257,9 @@ let rootDoesHavePassiveEffects: boolean = false;
 let rootWithPendingPassiveEffects: FiberRoot | null = null;
 let pendingPassiveEffectsRenderPriority: ReactPriorityLevel = NoPriority;
 let pendingPassiveEffectsExpirationTime: ExpirationTime = NoWork;
+let pendingPassiveHookEffectsMount: Array<HookEffect | Fiber> = [];
+let pendingPassiveHookEffectsUnmount: Array<HookEffect | Fiber> = [];
+let pendingPassiveProfilerEffects: Array<Fiber> = [];
 
 let rootsWithPendingDiscreteUpdates: Map<
   FiberRoot,
@@ -287,6 +291,14 @@ let spawnedWorkDuringRender: null | Array<ExpirationTime> = null;
 // we want all updates of like priority that occur within the same event to
 // receive the same expiration time. Otherwise we get tearing.
 let currentEventTime: ExpirationTime = NoWork;
+
+// Dev only flag that tracks if passive effects are currently being flushed.
+// We warn about state updates for unmounted components differently in this case.
+let isFlushingPassiveEffects = false;
+
+export function getWorkInProgressRoot(): FiberRoot | null {
+  return workInProgressRoot;
+}
 
 export function requestCurrentTimeForUpdate() {
   if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
@@ -376,7 +388,7 @@ export function scheduleUpdateOnFiber(
   expirationTime: ExpirationTime,
 ) {
   checkForNestedUpdates();
-  warnAboutInvalidUpdatesOnClassComponentsInDEV(fiber);
+  warnAboutRenderPhaseUpdatesInDEV(fiber);
 
   const root = markUpdateTimeFromFiberToRoot(fiber, expirationTime);
   if (root === null) {
@@ -441,7 +453,6 @@ export function scheduleUpdateOnFiber(
     }
   }
 }
-export const scheduleWork = scheduleUpdateOnFiber;
 
 // This is split into a separate function so we can mark a fiber with pending
 // work without treating it as a typical update that originates from an event;
@@ -539,9 +550,15 @@ function getNextRootExpirationTimeToWorkOn(root: FiberRoot): ExpirationTime {
   // on whichever is higher priority.
   const lastPingedTime = root.lastPingedTime;
   const nextKnownPendingLevel = root.nextKnownPendingLevel;
-  return lastPingedTime > nextKnownPendingLevel
-    ? lastPingedTime
-    : nextKnownPendingLevel;
+  const nextLevel =
+    lastPingedTime > nextKnownPendingLevel
+      ? lastPingedTime
+      : nextKnownPendingLevel;
+  if (nextLevel <= Idle && firstPendingTime !== nextLevel) {
+    // Don't work on Idle/Never priority unless everything else is committed.
+    return NoWork;
+  }
+  return nextLevel;
 }
 
 // Use this function to schedule a task for a root. There's only one task per
@@ -633,6 +650,7 @@ function performConcurrentWorkOnRoot(root, didTimeout) {
   // event time. The next update will compute a new event time.
   currentEventTime = NoWork;
 
+  // Check if the render expired.
   if (didTimeout) {
     // The render task took too long to complete. Mark the current time as
     // expired to synchronously render all expired work in a single batch.
@@ -645,84 +663,52 @@ function performConcurrentWorkOnRoot(root, didTimeout) {
 
   // Determine the next expiration time to work on, using the fields stored
   // on the root.
-  const expirationTime = getNextRootExpirationTimeToWorkOn(root);
-  if (expirationTime !== NoWork) {
-    const originalCallbackNode = root.callbackNode;
-    invariant(
-      (executionContext & (RenderContext | CommitContext)) === NoContext,
-      'Should not already be working.',
-    );
+  let expirationTime = getNextRootExpirationTimeToWorkOn(root);
+  if (expirationTime === NoWork) {
+    return null;
+  }
+  const originalCallbackNode = root.callbackNode;
+  invariant(
+    (executionContext & (RenderContext | CommitContext)) === NoContext,
+    'Should not already be working.',
+  );
 
-    flushPassiveEffects();
+  flushPassiveEffects();
 
-    // If the root or expiration time have changed, throw out the existing stack
-    // and prepare a fresh one. Otherwise we'll continue where we left off.
-    if (
-      root !== workInProgressRoot ||
-      expirationTime !== renderExpirationTime
-    ) {
+  let exitStatus = renderRootConcurrent(root, expirationTime);
+
+  if (exitStatus !== RootIncomplete) {
+    if (exitStatus === RootErrored) {
+      // If something threw an error, try rendering one more time. We'll
+      // render synchronously to block concurrent data mutations, and we'll
+      // render at Idle (or lower) so that all pending updates are included.
+      // If it still fails after the second attempt, we'll give up and commit
+      // the resulting tree.
+      expirationTime = expirationTime > Idle ? Idle : expirationTime;
+      exitStatus = renderRootSync(root, expirationTime);
+    }
+
+    if (exitStatus === RootFatalErrored) {
+      const fatalError = workInProgressRootFatalError;
       prepareFreshStack(root, expirationTime);
-      startWorkOnPendingInteractions(root, expirationTime);
-    }
-
-    // If we have a work-in-progress fiber, it means there's still work to do
-    // in this root.
-    if (workInProgress !== null) {
-      const prevExecutionContext = executionContext;
-      executionContext |= RenderContext;
-      const prevDispatcher = pushDispatcher(root);
-      const prevInteractions = pushInteractions(root);
-      startWorkLoopTimer(workInProgress);
-      do {
-        try {
-          workLoopConcurrent();
-          break;
-        } catch (thrownValue) {
-          handleError(root, thrownValue);
-        }
-      } while (true);
-      resetContextDependencies();
-      executionContext = prevExecutionContext;
-      popDispatcher(prevDispatcher);
-      if (enableSchedulerTracing) {
-        popInteractions(((prevInteractions: any): Set<Interaction>));
-      }
-
-      if (workInProgressRootExitStatus === RootFatalErrored) {
-        const fatalError = workInProgressRootFatalError;
-        stopInterruptedWorkLoopTimer();
-        prepareFreshStack(root, expirationTime);
-        markRootSuspendedAtTime(root, expirationTime);
-        ensureRootIsScheduled(root);
-        throw fatalError;
-      }
-
-      if (workInProgress !== null) {
-        // There's still work left over. Exit without committing.
-        stopInterruptedWorkLoopTimer();
-      } else {
-        // We now have a consistent tree. The next step is either to commit it,
-        // or, if something suspended, wait to commit it after a timeout.
-        stopFinishedWorkLoopTimer();
-
-        const finishedWork: Fiber = ((root.finishedWork =
-          root.current.alternate): any);
-        root.finishedExpirationTime = expirationTime;
-        finishConcurrentRender(
-          root,
-          finishedWork,
-          workInProgressRootExitStatus,
-          expirationTime,
-        );
-      }
-
+      markRootSuspendedAtTime(root, expirationTime);
       ensureRootIsScheduled(root);
-      if (root.callbackNode === originalCallbackNode) {
-        // The task node scheduled for this root is the same one that's
-        // currently executed. Need to return a continuation.
-        return performConcurrentWorkOnRoot.bind(null, root);
-      }
+      throw fatalError;
     }
+
+    // We now have a consistent tree. The next step is either to commit it,
+    // or, if something suspended, wait to commit it after a timeout.
+    const finishedWork: Fiber = ((root.finishedWork =
+      root.current.alternate): any);
+    root.finishedExpirationTime = expirationTime;
+    finishConcurrentRender(root, finishedWork, exitStatus, expirationTime);
+  }
+
+  ensureRootIsScheduled(root);
+  if (root.callbackNode === originalCallbackNode) {
+    // The task node scheduled for this root is the same one that's
+    // currently executed. Need to return a continuation.
+    return performConcurrentWorkOnRoot.bind(null, root);
   }
   return null;
 }
@@ -733,9 +719,6 @@ function finishConcurrentRender(
   exitStatus,
   expirationTime,
 ) {
-  // Set this to null to indicate there's no in-progress render.
-  workInProgressRoot = null;
-
   switch (exitStatus) {
     case RootIncomplete:
     case RootFatalErrored: {
@@ -745,19 +728,9 @@ function finishConcurrentRender(
     // statement, but eslint doesn't know about invariant, so it complains
     // if I do. eslint-disable-next-line no-fallthrough
     case RootErrored: {
-      // If this was an async render, the error may have happened due to
-      // a mutation in a concurrent event. Try rendering one more time,
-      // synchronously, to see if the error goes away. If there are
-      // lower priority updates, let's include those, too, in case they
-      // fix the inconsistency. Render at Idle to include all updates.
-      // If it was Idle or Never or some not-yet-invented time, render
-      // at that time.
-      markRootExpiredAtTime(
-        root,
-        expirationTime > Idle ? Idle : expirationTime,
-      );
-      // We assume that this second render pass will be synchronous
-      // and therefore not hit this path again.
+      // We should have already attempted to retry this tree. If we reached
+      // this point, it errored again. Commit it.
+      commitRoot(root);
       break;
     }
     case RootSuspended: {
@@ -766,7 +739,6 @@ function finishConcurrentRender(
       if (expirationTime === lastSuspendedTime) {
         root.nextKnownPendingLevel = getRemainingExpirationTime(finishedWork);
       }
-      flushSuspensePriorityWarningInDEV();
 
       // We have an acceptable loading state. We need to figure out if we
       // should immediately commit it or wait a bit.
@@ -842,7 +814,6 @@ function finishConcurrentRender(
       if (expirationTime === lastSuspendedTime) {
         root.nextKnownPendingLevel = getRemainingExpirationTime(finishedWork);
       }
-      flushSuspensePriorityWarningInDEV();
 
       if (
         // do not delay if we're inside an act() scope
@@ -975,100 +946,68 @@ function finishConcurrentRender(
 // This is the entry point for synchronous tasks that don't go
 // through Scheduler
 function performSyncWorkOnRoot(root) {
-  // Check if there's expired work on this root. Otherwise, render at Sync.
+  invariant(
+    (executionContext & (RenderContext | CommitContext)) === NoContext,
+    'Should not already be working.',
+  );
+
+  flushPassiveEffects();
+
   const lastExpiredTime = root.lastExpiredTime;
-  const expirationTime = lastExpiredTime !== NoWork ? lastExpiredTime : Sync;
-  if (root.finishedExpirationTime === expirationTime) {
-    // There's already a pending commit at this expiration time.
-    // TODO: This is poorly factored. This case only exists for the
-    // batch.commit() API.
-    commitRoot(root);
-  } else {
-    invariant(
-      (executionContext & (RenderContext | CommitContext)) === NoContext,
-      'Should not already be working.',
-    );
 
-    flushPassiveEffects();
-
-    // If the root or expiration time have changed, throw out the existing stack
-    // and prepare a fresh one. Otherwise we'll continue where we left off.
+  let expirationTime;
+  if (lastExpiredTime !== NoWork) {
+    // There's expired work on this root. Check if we have a partial tree
+    // that we can reuse.
     if (
-      root !== workInProgressRoot ||
-      expirationTime !== renderExpirationTime
+      root === workInProgressRoot &&
+      renderExpirationTime >= lastExpiredTime
     ) {
-      prepareFreshStack(root, expirationTime);
-      startWorkOnPendingInteractions(root, expirationTime);
+      // There's a partial tree with equal or greater than priority than the
+      // expired level. Finish rendering it before rendering the rest of the
+      // expired work.
+      expirationTime = renderExpirationTime;
+    } else {
+      // Start a fresh tree.
+      expirationTime = lastExpiredTime;
     }
-
-    // If we have a work-in-progress fiber, it means there's still work to do
-    // in this root.
-    if (workInProgress !== null) {
-      const prevExecutionContext = executionContext;
-      executionContext |= RenderContext;
-      const prevDispatcher = pushDispatcher(root);
-      const prevInteractions = pushInteractions(root);
-      startWorkLoopTimer(workInProgress);
-
-      do {
-        try {
-          workLoopSync();
-          break;
-        } catch (thrownValue) {
-          handleError(root, thrownValue);
-        }
-      } while (true);
-      resetContextDependencies();
-      executionContext = prevExecutionContext;
-      popDispatcher(prevDispatcher);
-      if (enableSchedulerTracing) {
-        popInteractions(((prevInteractions: any): Set<Interaction>));
-      }
-
-      if (workInProgressRootExitStatus === RootFatalErrored) {
-        const fatalError = workInProgressRootFatalError;
-        stopInterruptedWorkLoopTimer();
-        prepareFreshStack(root, expirationTime);
-        markRootSuspendedAtTime(root, expirationTime);
-        ensureRootIsScheduled(root);
-        throw fatalError;
-      }
-
-      if (workInProgress !== null) {
-        // This is a sync render, so we should have finished the whole tree.
-        invariant(
-          false,
-          'Cannot commit an incomplete root. This error is likely caused by a ' +
-            'bug in React. Please file an issue.',
-        );
-      } else {
-        // We now have a consistent tree. Because this is a sync render, we
-        // will commit it even if something suspended.
-        stopFinishedWorkLoopTimer();
-        root.finishedWork = (root.current.alternate: any);
-        root.finishedExpirationTime = expirationTime;
-        finishSyncRender(root, workInProgressRootExitStatus, expirationTime);
-      }
-
-      // Before exiting, make sure there's a callback scheduled for the next
-      // pending level.
-      ensureRootIsScheduled(root);
-    }
+  } else {
+    // There's no expired work. This must be a new, synchronous render.
+    expirationTime = Sync;
   }
+
+  let exitStatus = renderRootSync(root, expirationTime);
+
+  if (root.tag !== LegacyRoot && exitStatus === RootErrored) {
+    // If something threw an error, try rendering one more time. We'll
+    // render synchronously to block concurrent data mutations, and we'll
+    // render at Idle (or lower) so that all pending updates are included.
+    // If it still fails after the second attempt, we'll give up and commit
+    // the resulting tree.
+    expirationTime = expirationTime > Idle ? Idle : expirationTime;
+    exitStatus = renderRootSync(root, expirationTime);
+  }
+
+  if (exitStatus === RootFatalErrored) {
+    const fatalError = workInProgressRootFatalError;
+    prepareFreshStack(root, expirationTime);
+    markRootSuspendedAtTime(root, expirationTime);
+    ensureRootIsScheduled(root);
+    throw fatalError;
+  }
+
+  // We now have a consistent tree. Because this is a sync render, we
+  // will commit it even if something suspended.
+  root.finishedWork = (root.current.alternate: any);
+  root.finishedExpirationTime = expirationTime;
+
+  commitRoot(root);
+
+  // Before exiting, make sure there's a callback scheduled for the next
+  // pending level.
+  ensureRootIsScheduled(root);
 
   return null;
-}
-
-function finishSyncRender(root, exitStatus, expirationTime) {
-  // Set this to null to indicate there's no in-progress render.
-  workInProgressRoot = null;
-
-  if (__DEV__) {
-    if (exitStatus === RootSuspended || exitStatus === RootSuspendedWithDelay) {
-      flushSuspensePriorityWarningInDEV();
-    }
-  }
-  commitRoot(root);
 }
 
 export function flushRoot(root: FiberRoot, expirationTime: ExpirationTime) {
@@ -1088,12 +1027,13 @@ export function flushDiscreteUpdates() {
     (executionContext & (BatchedContext | RenderContext | CommitContext)) !==
     NoContext
   ) {
-    if (__DEV__ && (executionContext & RenderContext) !== NoContext) {
-      warning(
-        false,
-        'unstable_flushDiscreteUpdates: Cannot flush updates when React is ' +
-          'already rendering.',
-      );
+    if (__DEV__) {
+      if ((executionContext & RenderContext) !== NoContext) {
+        console.error(
+          'unstable_flushDiscreteUpdates: Cannot flush updates when React is ' +
+            'already rendering.',
+        );
+      }
     }
     // We're already rendering, so we can't synchronously flush pending work.
     // This is probably a nested event dispatch triggered by a lifecycle/effect,
@@ -1163,17 +1103,18 @@ export function batchedEventUpdates<A, R>(fn: A => R, a: A): R {
   }
 }
 
-export function discreteUpdates<A, B, C, R>(
+export function discreteUpdates<A, B, C, D, R>(
   fn: (A, B, C) => R,
   a: A,
   b: B,
   c: C,
+  d: D,
 ): R {
   const prevExecutionContext = executionContext;
   executionContext |= DiscreteEventContext;
   try {
     // Should this
-    return runWithPriority(UserBlockingPriority, fn.bind(null, a, b, c));
+    return runWithPriority(UserBlockingPriority, fn.bind(null, a, b, c, d));
   } finally {
     executionContext = prevExecutionContext;
     if (executionContext === NoContext) {
@@ -1254,7 +1195,7 @@ function prepareFreshStack(root, expirationTime) {
     }
   }
   workInProgressRoot = root;
-  workInProgress = createWorkInProgress(root.current, null, expirationTime);
+  workInProgress = createWorkInProgress(root.current, null);
   renderExpirationTime = expirationTime;
   workInProgressRootExitStatus = RootIncomplete;
   workInProgressRootFatalError = null;
@@ -1270,7 +1211,6 @@ function prepareFreshStack(root, expirationTime) {
 
   if (__DEV__) {
     ReactStrictModeWarnings.discardPendingWarnings();
-    componentsThatTriggeredHighPriSuspend = null;
   }
 }
 
@@ -1279,7 +1219,7 @@ function handleError(root, thrownValue) {
     try {
       // Reset module-level state that was set during the render phase.
       resetContextDependencies();
-      resetHooks();
+      resetHooksAfterThrow();
       resetCurrentDebugFiberInDEV();
 
       if (workInProgress === null || workInProgress.return === null) {
@@ -1289,6 +1229,13 @@ function handleError(root, thrownValue) {
         // boundary.
         workInProgressRootExitStatus = RootFatalErrored;
         workInProgressRootFatalError = thrownValue;
+        // Set `workInProgress` to null. This represents advancing to the next
+        // sibling, or the parent if there are no siblings. But since the root
+        // has no siblings nor a parent, we set it to null. Usually this is
+        // handled by `completeUnitOfWork` or `unwindWork`, but since we're
+        // interntionally not calling those, we need set it here.
+        // TODO: Consider calling `unwindWork` to pop the contexts.
+        workInProgress = null;
         return null;
       }
 
@@ -1449,12 +1396,106 @@ function inferTimeFromExpirationTimeWithSuspenseConfig(
   );
 }
 
+function renderRootSync(root, expirationTime) {
+  const prevExecutionContext = executionContext;
+  executionContext |= RenderContext;
+  const prevDispatcher = pushDispatcher(root);
+
+  // If the root or expiration time have changed, throw out the existing stack
+  // and prepare a fresh one. Otherwise we'll continue where we left off.
+  if (root !== workInProgressRoot || expirationTime !== renderExpirationTime) {
+    prepareFreshStack(root, expirationTime);
+    startWorkOnPendingInteractions(root, expirationTime);
+  }
+
+  const prevInteractions = pushInteractions(root);
+  startWorkLoopTimer(workInProgress);
+  do {
+    try {
+      workLoopSync();
+      break;
+    } catch (thrownValue) {
+      handleError(root, thrownValue);
+    }
+  } while (true);
+  resetContextDependencies();
+  if (enableSchedulerTracing) {
+    popInteractions(((prevInteractions: any): Set<Interaction>));
+  }
+
+  executionContext = prevExecutionContext;
+  popDispatcher(prevDispatcher);
+
+  if (workInProgress !== null) {
+    // This is a sync render, so we should have finished the whole tree.
+    invariant(
+      false,
+      'Cannot commit an incomplete root. This error is likely caused by a ' +
+        'bug in React. Please file an issue.',
+    );
+  }
+
+  stopFinishedWorkLoopTimer();
+
+  // Set this to null to indicate there's no in-progress render.
+  workInProgressRoot = null;
+
+  return workInProgressRootExitStatus;
+}
+
 // The work loop is an extremely hot path. Tell Closure not to inline it.
 /** @noinline */
 function workLoopSync() {
   // Already timed out, so perform work without checking if we need to yield.
   while (workInProgress !== null) {
     workInProgress = performUnitOfWork(workInProgress);
+  }
+}
+
+function renderRootConcurrent(root, expirationTime) {
+  const prevExecutionContext = executionContext;
+  executionContext |= RenderContext;
+  const prevDispatcher = pushDispatcher(root);
+
+  // If the root or expiration time have changed, throw out the existing stack
+  // and prepare a fresh one. Otherwise we'll continue where we left off.
+  if (root !== workInProgressRoot || expirationTime !== renderExpirationTime) {
+    prepareFreshStack(root, expirationTime);
+    startWorkOnPendingInteractions(root, expirationTime);
+  }
+
+  const prevInteractions = pushInteractions(root);
+  startWorkLoopTimer(workInProgress);
+  do {
+    try {
+      workLoopConcurrent();
+      break;
+    } catch (thrownValue) {
+      handleError(root, thrownValue);
+    }
+  } while (true);
+  resetContextDependencies();
+  if (enableSchedulerTracing) {
+    popInteractions(((prevInteractions: any): Set<Interaction>));
+  }
+
+  popDispatcher(prevDispatcher);
+  executionContext = prevExecutionContext;
+
+  // Check if the tree has completed.
+  if (workInProgress !== null) {
+    // Still work remaining.
+    stopInterruptedWorkLoopTimer();
+    return RootIncomplete;
+  } else {
+    // Completed the tree.
+    stopFinishedWorkLoopTimer();
+
+    // Set this to null to indicate there's no in-progress render.
+    workInProgressRoot = null;
+
+    // Return the final exit status.
+    return workInProgressRootExitStatus;
   }
 }
 
@@ -1713,7 +1754,15 @@ function commitRoot(root) {
 }
 
 function commitRootImpl(root, renderPriorityLevel) {
-  flushPassiveEffects();
+  do {
+    // `flushPassiveEffects` will call `flushSyncUpdateQueue` at the end, which
+    // means `flushPassiveEffects` will sometimes result in additional
+    // passive effects. So we need to keep flushing in a loop until there are
+    // no more pending effects.
+    // TODO: Might be better if `flushPassiveEffects` did not automatically
+    // flush synchronous work at the end, to avoid factoring hazards like this.
+    flushPassiveEffects();
+  } while (rootWithPendingPassiveEffects !== null);
   flushRenderPhaseStrictModeWarningsInDEV();
 
   invariant(
@@ -2166,10 +2215,61 @@ export function flushPassiveEffects() {
   }
 }
 
+export function enqueuePendingPassiveProfilerEffect(fiber: Fiber): void {
+  if (enableProfilerTimer && enableProfilerCommitHooks) {
+    pendingPassiveProfilerEffects.push(fiber);
+    if (!rootDoesHavePassiveEffects) {
+      rootDoesHavePassiveEffects = true;
+      scheduleCallback(NormalPriority, () => {
+        flushPassiveEffects();
+        return null;
+      });
+    }
+  }
+}
+
+export function enqueuePendingPassiveHookEffectMount(
+  fiber: Fiber,
+  effect: HookEffect,
+): void {
+  if (runAllPassiveEffectDestroysBeforeCreates) {
+    pendingPassiveHookEffectsMount.push(effect, fiber);
+    if (!rootDoesHavePassiveEffects) {
+      rootDoesHavePassiveEffects = true;
+      scheduleCallback(NormalPriority, () => {
+        flushPassiveEffects();
+        return null;
+      });
+    }
+  }
+}
+
+export function enqueuePendingPassiveHookEffectUnmount(
+  fiber: Fiber,
+  effect: HookEffect,
+): void {
+  if (runAllPassiveEffectDestroysBeforeCreates) {
+    pendingPassiveHookEffectsUnmount.push(effect, fiber);
+    if (!rootDoesHavePassiveEffects) {
+      rootDoesHavePassiveEffects = true;
+      scheduleCallback(NormalPriority, () => {
+        flushPassiveEffects();
+        return null;
+      });
+    }
+  }
+}
+
+function invokePassiveEffectCreate(effect: HookEffect): void {
+  const create = effect.create;
+  effect.destroy = create();
+}
+
 function flushPassiveEffectsImpl() {
   if (rootWithPendingPassiveEffects === null) {
     return false;
   }
+
   const root = rootWithPendingPassiveEffects;
   const expirationTime = pendingPassiveEffectsExpirationTime;
   rootWithPendingPassiveEffects = null;
@@ -2179,41 +2279,169 @@ function flushPassiveEffectsImpl() {
     (executionContext & (RenderContext | CommitContext)) === NoContext,
     'Cannot flush passive effects while already rendering.',
   );
+
+  if (__DEV__) {
+    isFlushingPassiveEffects = true;
+  }
+
   const prevExecutionContext = executionContext;
   executionContext |= CommitContext;
   const prevInteractions = pushInteractions(root);
 
-  // Note: This currently assumes there are no passive effects on the root
-  // fiber, because the root is not part of its own effect list. This could
-  // change in the future.
-  let effect = root.current.firstEffect;
-  while (effect !== null) {
-    if (__DEV__) {
-      setCurrentDebugFiberInDEV(effect);
-      invokeGuardedCallback(null, commitPassiveHookEffects, null, effect);
-      if (hasCaughtError()) {
-        invariant(effect !== null, 'Should be working on an effect.');
-        const error = clearCaughtError();
-        captureCommitPhaseError(effect, error);
-      }
-      resetCurrentDebugFiberInDEV();
-    } else {
-      try {
-        commitPassiveHookEffects(effect);
-      } catch (error) {
-        invariant(effect !== null, 'Should be working on an effect.');
-        captureCommitPhaseError(effect, error);
+  if (runAllPassiveEffectDestroysBeforeCreates) {
+    // It's important that ALL pending passive effect destroy functions are called
+    // before ANY passive effect create functions are called.
+    // Otherwise effects in sibling components might interfere with each other.
+    // e.g. a destroy function in one component may unintentionally override a ref
+    // value set by a create function in another component.
+    // Layout effects have the same constraint.
+
+    // First pass: Destroy stale passive effects.
+    let unmountEffects = pendingPassiveHookEffectsUnmount;
+    pendingPassiveHookEffectsUnmount = [];
+    for (let i = 0; i < unmountEffects.length; i += 2) {
+      const effect = ((unmountEffects[i]: any): HookEffect);
+      const fiber = ((unmountEffects[i + 1]: any): Fiber);
+      const destroy = effect.destroy;
+      effect.destroy = undefined;
+      if (typeof destroy === 'function') {
+        if (__DEV__) {
+          setCurrentDebugFiberInDEV(fiber);
+          if (
+            enableProfilerTimer &&
+            enableProfilerCommitHooks &&
+            fiber.mode & ProfileMode
+          ) {
+            startPassiveEffectTimer();
+            invokeGuardedCallback(null, destroy, null);
+            recordPassiveEffectDuration(fiber);
+          } else {
+            invokeGuardedCallback(null, destroy, null);
+          }
+          if (hasCaughtError()) {
+            invariant(fiber !== null, 'Should be working on an effect.');
+            const error = clearCaughtError();
+            captureCommitPhaseError(fiber, error);
+          }
+          resetCurrentDebugFiberInDEV();
+        } else {
+          try {
+            if (
+              enableProfilerTimer &&
+              enableProfilerCommitHooks &&
+              fiber.mode & ProfileMode
+            ) {
+              try {
+                startPassiveEffectTimer();
+                destroy();
+              } finally {
+                recordPassiveEffectDuration(fiber);
+              }
+            } else {
+              destroy();
+            }
+          } catch (error) {
+            invariant(fiber !== null, 'Should be working on an effect.');
+            captureCommitPhaseError(fiber, error);
+          }
+        }
       }
     }
-    const nextNextEffect = effect.nextEffect;
-    // Remove nextEffect pointer to assist GC
-    effect.nextEffect = null;
-    effect = nextNextEffect;
+    // Second pass: Create new passive effects.
+    let mountEffects = pendingPassiveHookEffectsMount;
+    pendingPassiveHookEffectsMount = [];
+    for (let i = 0; i < mountEffects.length; i += 2) {
+      const effect = ((mountEffects[i]: any): HookEffect);
+      const fiber = ((mountEffects[i + 1]: any): Fiber);
+      if (__DEV__) {
+        setCurrentDebugFiberInDEV(fiber);
+        if (
+          enableProfilerTimer &&
+          enableProfilerCommitHooks &&
+          fiber.mode & ProfileMode
+        ) {
+          startPassiveEffectTimer();
+          invokeGuardedCallback(null, invokePassiveEffectCreate, null, effect);
+          recordPassiveEffectDuration(fiber);
+        } else {
+          invokeGuardedCallback(null, invokePassiveEffectCreate, null, effect);
+        }
+        if (hasCaughtError()) {
+          invariant(fiber !== null, 'Should be working on an effect.');
+          const error = clearCaughtError();
+          captureCommitPhaseError(fiber, error);
+        }
+        resetCurrentDebugFiberInDEV();
+      } else {
+        try {
+          const create = effect.create;
+          if (
+            enableProfilerTimer &&
+            enableProfilerCommitHooks &&
+            fiber.mode & ProfileMode
+          ) {
+            try {
+              startPassiveEffectTimer();
+              effect.destroy = create();
+            } finally {
+              recordPassiveEffectDuration(fiber);
+            }
+          } else {
+            effect.destroy = create();
+          }
+        } catch (error) {
+          invariant(fiber !== null, 'Should be working on an effect.');
+          captureCommitPhaseError(fiber, error);
+        }
+      }
+    }
+  } else {
+    // Note: This currently assumes there are no passive effects on the root fiber
+    // because the root is not part of its own effect list.
+    // This could change in the future.
+    let effect = root.current.firstEffect;
+    while (effect !== null) {
+      if (__DEV__) {
+        setCurrentDebugFiberInDEV(effect);
+        invokeGuardedCallback(null, commitPassiveHookEffects, null, effect);
+        if (hasCaughtError()) {
+          invariant(effect !== null, 'Should be working on an effect.');
+          const error = clearCaughtError();
+          captureCommitPhaseError(effect, error);
+        }
+        resetCurrentDebugFiberInDEV();
+      } else {
+        try {
+          commitPassiveHookEffects(effect);
+        } catch (error) {
+          invariant(effect !== null, 'Should be working on an effect.');
+          captureCommitPhaseError(effect, error);
+        }
+      }
+
+      const nextNextEffect = effect.nextEffect;
+      // Remove nextEffect pointer to assist GC
+      effect.nextEffect = null;
+      effect = nextNextEffect;
+    }
+  }
+
+  if (enableProfilerTimer && enableProfilerCommitHooks) {
+    let profilerEffects = pendingPassiveProfilerEffects;
+    pendingPassiveProfilerEffects = [];
+    for (let i = 0; i < profilerEffects.length; i++) {
+      const fiber = ((profilerEffects[i]: any): Fiber);
+      commitPassiveEffectDurations(root, fiber);
+    }
   }
 
   if (enableSchedulerTracing) {
     popInteractions(((prevInteractions: any): Set<Interaction>));
     finishPendingInteractions(root, expirationTime);
+  }
+
+  if (__DEV__) {
+    isFlushingPassiveEffects = false;
   }
 
   executionContext = prevExecutionContext;
@@ -2309,14 +2537,14 @@ export function captureCommitPhaseError(sourceFiber: Fiber, error: mixed) {
 
 export function pingSuspendedRoot(
   root: FiberRoot,
-  thenable: Thenable,
+  wakeable: Wakeable,
   suspendedTime: ExpirationTime,
 ) {
   const pingCache = root.pingCache;
   if (pingCache !== null) {
-    // The thenable resolved, so we no longer need to memoize, because it will
+    // The wakeable resolved, so we no longer need to memoize, because it will
     // never be thrown again.
-    pingCache.delete(thenable);
+    pingCache.delete(wakeable);
   }
 
   if (workInProgressRoot === root && renderExpirationTime === suspendedTime) {
@@ -2364,12 +2592,6 @@ export function pingSuspendedRoot(
   // Mark the time at which this ping was scheduled.
   root.lastPingedTime = suspendedTime;
 
-  if (root.finishedExpirationTime === suspendedTime) {
-    // If there's a pending fallback waiting to commit, throw it away.
-    root.finishedExpirationTime = NoWork;
-    root.finishedWork = null;
-  }
-
   ensureRootIsScheduled(root);
   schedulePendingInteractions(root, suspendedTime);
 }
@@ -2408,9 +2630,9 @@ export function retryDehydratedSuspenseBoundary(boundaryFiber: Fiber) {
   retryTimedOutBoundary(boundaryFiber, retryTime);
 }
 
-export function resolveRetryThenable(boundaryFiber: Fiber, thenable: Thenable) {
+export function resolveRetryWakeable(boundaryFiber: Fiber, wakeable: Wakeable) {
   let retryTime = NoWork; // Default
-  let retryCache: WeakSet<Thenable> | Set<Thenable> | null;
+  let retryCache: WeakSet<Wakeable> | Set<Wakeable> | null;
   if (enableSuspenseServerRenderer) {
     switch (boundaryFiber.tag) {
       case SuspenseComponent:
@@ -2435,9 +2657,9 @@ export function resolveRetryThenable(boundaryFiber: Fiber, thenable: Thenable) {
   }
 
   if (retryCache !== null) {
-    // The thenable resolved, so we no longer need to memoize, because it will
+    // The wakeable resolved, so we no longer need to memoize, because it will
     // never be thrown again.
-    retryCache.delete(thenable);
+    retryCache.delete(wakeable);
   }
 
   retryTimedOutBoundary(boundaryFiber, retryTime);
@@ -2456,16 +2678,16 @@ function jnd(timeElapsed: number) {
   return timeElapsed < 120
     ? 120
     : timeElapsed < 480
-      ? 480
-      : timeElapsed < 1080
-        ? 1080
-        : timeElapsed < 1920
-          ? 1920
-          : timeElapsed < 3000
-            ? 3000
-            : timeElapsed < 4320
-              ? 4320
-              : ceil(timeElapsed / 1960) * 1960;
+    ? 480
+    : timeElapsed < 1080
+    ? 1080
+    : timeElapsed < 1920
+    ? 1920
+    : timeElapsed < 3000
+    ? 3000
+    : timeElapsed < 4320
+    ? 4320
+    : ceil(timeElapsed / 1960) * 1960;
 }
 
 function computeMsUntilSuspenseLoadingDelay(
@@ -2512,8 +2734,7 @@ function checkForNestedUpdates() {
   if (__DEV__) {
     if (nestedPassiveUpdateCount > NESTED_PASSIVE_UPDATE_LIMIT) {
       nestedPassiveUpdateCount = 0;
-      warning(
-        false,
+      console.error(
         'Maximum update depth exceeded. This can happen when a component ' +
           "calls setState inside useEffect, but useEffect either doesn't " +
           'have a dependency array, or one of the dependencies changes on ' +
@@ -2569,11 +2790,24 @@ function warnAboutUpdateOnUnmountedFiberInDEV(fiber) {
       tag !== FunctionComponent &&
       tag !== ForwardRef &&
       tag !== MemoComponent &&
-      tag !== SimpleMemoComponent
+      tag !== SimpleMemoComponent &&
+      tag !== Block
     ) {
       // Only warn for user-defined components, not internal ones like Suspense.
       return;
     }
+
+    if (
+      deferPassiveEffectCleanupDuringUnmount &&
+      runAllPassiveEffectDestroysBeforeCreates
+    ) {
+      // If there are pending passive effects unmounts for this Fiber,
+      // we can assume that they would have prevented this update.
+      if (pendingPassiveHookEffectsUnmount.indexOf(fiber) >= 0) {
+        return;
+      }
+    }
+
     // We show the whole stack but dedupe on the top component's name because
     // the problematic code almost always lies inside that component.
     const componentName = getComponentName(fiber.type) || 'ReactComponent';
@@ -2585,16 +2819,28 @@ function warnAboutUpdateOnUnmountedFiberInDEV(fiber) {
     } else {
       didWarnStateUpdateForUnmountedComponent = new Set([componentName]);
     }
-    warningWithoutStack(
-      false,
-      "Can't perform a React state update on an unmounted component. This " +
-        'is a no-op, but it indicates a memory leak in your application. To ' +
-        'fix, cancel all subscriptions and asynchronous tasks in %s.%s',
-      tag === ClassComponent
-        ? 'the componentWillUnmount method'
-        : 'a useEffect cleanup function',
-      getStackByFiberInDevAndProd(fiber),
-    );
+
+    // If we are currently flushing passive effects, change the warning text.
+    if (isFlushingPassiveEffects) {
+      console.error(
+        "Can't perform a React state update from within a useEffect cleanup function. " +
+          'To fix, move state updates to the useEffect() body in %s.%s',
+        tag === ClassComponent
+          ? 'the componentWillUnmount method'
+          : 'a useEffect cleanup function',
+        getStackByFiberInDevAndProd(fiber),
+      );
+    } else {
+      console.error(
+        "Can't perform a React state update on an unmounted component. This " +
+          'is a no-op, but it indicates a memory leak in your application. To ' +
+          'fix, cancel all subscriptions and asynchronous tasks in %s.%s',
+        tag === ClassComponent
+          ? 'the componentWillUnmount method'
+          : 'a useEffect cleanup function',
+        getStackByFiberInDevAndProd(fiber),
+      );
+    }
   }
 }
 
@@ -2627,7 +2873,7 @@ if (__DEV__ && replayFailedUnitOfWorkWithInvokeGuardedCallback) {
       // Keep this code in sync with handleError; any changes here must have
       // corresponding changes there.
       resetContextDependencies();
-      resetHooks();
+      resetHooksAfterThrow();
       // Don't reset current debug fiber, since we're about to work on the
       // same fiber again.
 
@@ -2668,33 +2914,52 @@ if (__DEV__ && replayFailedUnitOfWorkWithInvokeGuardedCallback) {
 }
 
 let didWarnAboutUpdateInRender = false;
-let didWarnAboutUpdateInGetChildContext = false;
-function warnAboutInvalidUpdatesOnClassComponentsInDEV(fiber) {
+let didWarnAboutUpdateInRenderForAnotherComponent;
+if (__DEV__) {
+  didWarnAboutUpdateInRenderForAnotherComponent = new Set();
+}
+
+function warnAboutRenderPhaseUpdatesInDEV(fiber) {
   if (__DEV__) {
-    if (fiber.tag === ClassComponent) {
-      switch (ReactCurrentDebugFiberPhaseInDEV) {
-        case 'getChildContext':
-          if (didWarnAboutUpdateInGetChildContext) {
-            return;
+    if (
+      ReactCurrentDebugFiberIsRenderingInDEV &&
+      (executionContext & RenderContext) !== NoContext
+    ) {
+      switch (fiber.tag) {
+        case FunctionComponent:
+        case ForwardRef:
+        case SimpleMemoComponent: {
+          const renderingComponentName =
+            (workInProgress && getComponentName(workInProgress.type)) ||
+            'Unknown';
+          // Dedupe by the rendering component because it's the one that needs to be fixed.
+          const dedupeKey = renderingComponentName;
+          if (!didWarnAboutUpdateInRenderForAnotherComponent.has(dedupeKey)) {
+            didWarnAboutUpdateInRenderForAnotherComponent.add(dedupeKey);
+            const setStateComponentName =
+              getComponentName(fiber.type) || 'Unknown';
+            console.error(
+              'Cannot update a component (`%s`) while rendering a ' +
+                'different component (`%s`). To locate the bad setState() call inside `%s`, ' +
+                'follow the stack trace as described in https://fb.me/setstate-in-render',
+              setStateComponentName,
+              renderingComponentName,
+              renderingComponentName,
+            );
           }
-          warningWithoutStack(
-            false,
-            'setState(...): Cannot call setState() inside getChildContext()',
-          );
-          didWarnAboutUpdateInGetChildContext = true;
           break;
-        case 'render':
-          if (didWarnAboutUpdateInRender) {
-            return;
+        }
+        case ClassComponent: {
+          if (!didWarnAboutUpdateInRender) {
+            console.error(
+              'Cannot update during an existing state transition (such as ' +
+                'within `render`). Render methods should be a pure ' +
+                'function of props and state.',
+            );
+            didWarnAboutUpdateInRender = true;
           }
-          warningWithoutStack(
-            false,
-            'Cannot update during an existing state transition (such as ' +
-              'within `render`). Render methods should be a pure function of ' +
-              'props and state.',
-          );
-          didWarnAboutUpdateInRender = true;
           break;
+        }
       }
     }
   }
@@ -2710,16 +2975,19 @@ export function warnIfNotScopedWithMatchingAct(fiber: Fiber): void {
       IsSomeRendererActing.current === true &&
       IsThisRendererActing.current !== true
     ) {
-      warningWithoutStack(
-        false,
+      console.error(
         "It looks like you're using the wrong act() around your test interactions.\n" +
           'Be sure to use the matching version of act() corresponding to your renderer:\n\n' +
           '// for react-dom:\n' +
-          "import {act} from 'react-dom/test-utils';\n" +
+          // Break up imports to avoid accidentally parsing them as dependencies.
+          'import {act} fr' +
+          "om 'react-dom/test-utils';\n" +
           '// ...\n' +
           'act(() => ...);\n\n' +
           '// for react-test-renderer:\n' +
-          "import TestRenderer from 'react-test-renderer';\n" +
+          // Break up imports to avoid accidentally parsing them as dependencies.
+          'import TestRenderer fr' +
+          "om react-test-renderer';\n" +
           'const {act} = TestRenderer;\n' +
           '// ...\n' +
           'act(() => ...);' +
@@ -2738,8 +3006,7 @@ export function warnIfNotCurrentlyActingEffectsInDEV(fiber: Fiber): void {
       IsSomeRendererActing.current === false &&
       IsThisRendererActing.current === false
     ) {
-      warningWithoutStack(
-        false,
+      console.error(
         'An update to %s ran an effect, but was not wrapped in act(...).\n\n' +
           'When testing, code that causes React state updates should be ' +
           'wrapped into act(...):\n\n' +
@@ -2766,8 +3033,7 @@ function warnIfNotCurrentlyActingUpdatesInDEV(fiber: Fiber): void {
       IsSomeRendererActing.current === false &&
       IsThisRendererActing.current === false
     ) {
-      warningWithoutStack(
-        false,
+      console.error(
         'An update to %s inside a test was not wrapped in act(...).\n\n' +
           'When testing, code that causes React state updates should be ' +
           'wrapped into act(...):\n\n' +
@@ -2803,141 +3069,25 @@ export function warnIfUnmockedScheduler(fiber: Fiber) {
     ) {
       if (fiber.mode & BlockingMode || fiber.mode & ConcurrentMode) {
         didWarnAboutUnmockedScheduler = true;
-        warningWithoutStack(
-          false,
+        console.error(
           'In Concurrent or Sync modes, the "scheduler" module needs to be mocked ' +
             'to guarantee consistent behaviour across tests and browsers. ' +
             'For example, with jest: \n' +
-            "jest.mock('scheduler', () => require('scheduler/unstable_mock'));\n\n" +
+            // Break up requires to avoid accidentally parsing them as dependencies.
+            "jest.mock('scheduler', () => require" +
+            "('scheduler/unstable_mock'));\n\n" +
             'For more info, visit https://fb.me/react-mock-scheduler',
         );
       } else if (warnAboutUnmockedScheduler === true) {
         didWarnAboutUnmockedScheduler = true;
-        warningWithoutStack(
-          false,
+        console.error(
           'Starting from React v17, the "scheduler" module will need to be mocked ' +
             'to guarantee consistent behaviour across tests and browsers. ' +
             'For example, with jest: \n' +
-            "jest.mock('scheduler', () => require('scheduler/unstable_mock'));\n\n" +
+            // Break up requires to avoid accidentally parsing them as dependencies.
+            "jest.mock('scheduler', () => require" +
+            "('scheduler/unstable_mock'));\n\n" +
             'For more info, visit https://fb.me/react-mock-scheduler',
-        );
-      }
-    }
-  }
-}
-
-let componentsThatTriggeredHighPriSuspend = null;
-export function checkForWrongSuspensePriorityInDEV(sourceFiber: Fiber) {
-  if (__DEV__) {
-    const currentPriorityLevel = getCurrentPriorityLevel();
-    if (
-      (sourceFiber.mode & ConcurrentMode) !== NoEffect &&
-      (currentPriorityLevel === UserBlockingPriority ||
-        currentPriorityLevel === ImmediatePriority)
-    ) {
-      let workInProgressNode = sourceFiber;
-      while (workInProgressNode !== null) {
-        // Add the component that triggered the suspense
-        const current = workInProgressNode.alternate;
-        if (current !== null) {
-          // TODO: warn component that triggers the high priority
-          // suspend is the HostRoot
-          switch (workInProgressNode.tag) {
-            case ClassComponent:
-              // Loop through the component's update queue and see whether the component
-              // has triggered any high priority updates
-              const updateQueue = current.updateQueue;
-              if (updateQueue !== null) {
-                let update = updateQueue.firstUpdate;
-                while (update !== null) {
-                  const priorityLevel = update.priority;
-                  if (
-                    priorityLevel === UserBlockingPriority ||
-                    priorityLevel === ImmediatePriority
-                  ) {
-                    if (componentsThatTriggeredHighPriSuspend === null) {
-                      componentsThatTriggeredHighPriSuspend = new Set([
-                        getComponentName(workInProgressNode.type),
-                      ]);
-                    } else {
-                      componentsThatTriggeredHighPriSuspend.add(
-                        getComponentName(workInProgressNode.type),
-                      );
-                    }
-                    break;
-                  }
-                  update = update.next;
-                }
-              }
-              break;
-            case FunctionComponent:
-            case ForwardRef:
-            case SimpleMemoComponent:
-              if (
-                workInProgressNode.memoizedState !== null &&
-                workInProgressNode.memoizedState.baseUpdate !== null
-              ) {
-                let update = workInProgressNode.memoizedState.baseUpdate;
-                // Loop through the functional component's memoized state to see whether
-                // the component has triggered any high pri updates
-                while (update !== null) {
-                  const priority = update.priority;
-                  if (
-                    priority === UserBlockingPriority ||
-                    priority === ImmediatePriority
-                  ) {
-                    if (componentsThatTriggeredHighPriSuspend === null) {
-                      componentsThatTriggeredHighPriSuspend = new Set([
-                        getComponentName(workInProgressNode.type),
-                      ]);
-                    } else {
-                      componentsThatTriggeredHighPriSuspend.add(
-                        getComponentName(workInProgressNode.type),
-                      );
-                    }
-                    break;
-                  }
-                  if (
-                    update.next === workInProgressNode.memoizedState.baseUpdate
-                  ) {
-                    break;
-                  }
-                  update = update.next;
-                }
-              }
-              break;
-            default:
-              break;
-          }
-        }
-        workInProgressNode = workInProgressNode.return;
-      }
-    }
-  }
-}
-
-function flushSuspensePriorityWarningInDEV() {
-  if (__DEV__) {
-    if (componentsThatTriggeredHighPriSuspend !== null) {
-      const componentNames = [];
-      componentsThatTriggeredHighPriSuspend.forEach(name =>
-        componentNames.push(name),
-      );
-      componentsThatTriggeredHighPriSuspend = null;
-
-      if (componentNames.length > 0) {
-        warningWithoutStack(
-          false,
-          '%s triggered a user-blocking update that suspended.' +
-            '\n\n' +
-            'The fix is to split the update into multiple parts: a user-blocking ' +
-            'update to provide immediate feedback, and another update that ' +
-            'triggers the bulk of the changes.' +
-            '\n\n' +
-            'Refer to the documentation for useTransition to learn how ' +
-            'to implement this pattern.',
-          // TODO: Add link to React docs with more information, once it exists
-          componentNames.sort().join(', '),
         );
       }
     }

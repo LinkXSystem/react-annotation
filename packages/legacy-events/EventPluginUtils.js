@@ -7,7 +7,6 @@
 
 import {invokeGuardedCallbackAndCatchFirstError} from 'shared/ReactErrorUtils';
 import invariant from 'shared/invariant';
-import warningWithoutStack from 'shared/warningWithoutStack';
 
 export let getFiberCurrentPropsFromNode = null;
 export let getInstanceFromNode = null;
@@ -22,11 +21,12 @@ export function setComponentTree(
   getInstanceFromNode = getInstanceFromNodeImpl;
   getNodeFromInstance = getNodeFromInstanceImpl;
   if (__DEV__) {
-    warningWithoutStack(
-      getNodeFromInstance && getInstanceFromNode,
-      'EventPluginUtils.setComponentTree(...): Injected ' +
-        'module is missing getNodeFromInstance or getInstanceFromNode.',
-    );
+    if (!getNodeFromInstance || !getInstanceFromNode) {
+      console.error(
+        'EventPluginUtils.setComponentTree(...): Injected ' +
+          'module is missing getNodeFromInstance or getInstanceFromNode.',
+      );
+    }
   }
 }
 
@@ -40,20 +40,19 @@ if (__DEV__) {
     const listenersLen = listenersIsArr
       ? dispatchListeners.length
       : dispatchListeners
-        ? 1
-        : 0;
+      ? 1
+      : 0;
 
     const instancesIsArr = Array.isArray(dispatchInstances);
     const instancesLen = instancesIsArr
       ? dispatchInstances.length
       : dispatchInstances
-        ? 1
-        : 0;
+      ? 1
+      : 0;
 
-    warningWithoutStack(
-      instancesIsArr === listenersIsArr && instancesLen === listenersLen,
-      'EventPluginUtils: Invalid `event`.',
-    );
+    if (instancesIsArr !== listenersIsArr || instancesLen !== listenersLen) {
+      console.error('EventPluginUtils: Invalid `event`.');
+    }
   };
 }
 
@@ -65,7 +64,8 @@ if (__DEV__) {
  */
 export function executeDispatch(event, listener, inst) {
   const type = event.type || 'unknown-event';
-  event.currentTarget = getNodeFromInstance(inst);
+  event.currentTarget =
+    inst.tag !== undefined ? getNodeFromInstance(inst) : inst;
   invokeGuardedCallbackAndCatchFirstError(type, listener, undefined, event);
   event.currentTarget = null;
 }
@@ -80,12 +80,20 @@ export function executeDispatchesInOrder(event) {
     validateEventDispatches(event);
   }
   if (Array.isArray(dispatchListeners)) {
+    let previousInstance;
     for (let i = 0; i < dispatchListeners.length; i++) {
-      if (event.isPropagationStopped()) {
+      const instance = dispatchInstances[i];
+      // We check if the instance was the same as the last one,
+      // if it was, then we're still on the same instance thus
+      // propagation should not stop. If we add support for
+      // stopImmediatePropagation at some point, then we'll
+      // need to handle that case here differently.
+      if (instance !== previousInstance && event.isPropagationStopped()) {
         break;
       }
       // Listeners and Instances are two parallel arrays that are always in sync.
       executeDispatch(event, dispatchListeners[i], dispatchInstances[i]);
+      previousInstance = instance;
     }
   } else if (dispatchListeners) {
     executeDispatch(event, dispatchListeners, dispatchInstances);

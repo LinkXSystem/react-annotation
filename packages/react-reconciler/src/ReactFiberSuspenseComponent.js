@@ -10,8 +10,8 @@
 import type {Fiber} from './ReactFiber';
 import type {SuspenseInstance} from './ReactFiberHostConfig';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
-import {SuspenseComponent, SuspenseListComponent} from 'shared/ReactWorkTags';
-import {NoEffect, DidCapture} from 'shared/ReactSideEffectTags';
+import {SuspenseComponent, SuspenseListComponent} from './ReactWorkTags';
+import {NoEffect, DidCapture} from './ReactSideEffectTags';
 import {
   isSuspenseInstancePending,
   isSuspenseInstanceFallback,
@@ -20,6 +20,7 @@ import {
 export type SuspenseHydrationCallbacks = {
   onHydrated?: (suspenseInstance: SuspenseInstance) => void,
   onDeleted?: (suspenseInstance: SuspenseInstance) => void,
+  ...
 };
 
 // A null SuspenseState represents an unsuspended normal Suspense boundary.
@@ -47,6 +48,8 @@ export type SuspenseListRenderState = {|
   isBackwards: boolean,
   // The currently rendering tail row.
   rendering: null | Fiber,
+  // The absolute time when we started rendering the tail row.
+  renderingStartTime: number,
   // The last of the already rendered children.
   last: null | Fiber,
   // Remaining rows on the tail of the list.
